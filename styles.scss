@@ -25,16 +25,6 @@ not partials. --- //
 @import "message";
 @import "toc";
 
-body {
-  background-color: $body-bg;
-  color: $text-color;
-}
-
-body.dark-theme {
-  background-color: $body-bg-dark;
-  color: $text-color-dark;
-}
-
 // Sass for creating the swatches
 .colors {
   display: grid;
