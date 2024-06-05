@@ -1,31 +1,59 @@
-<!DOCTYPE html>
+<!-- <!DOCTYPE html>
 <html lang="en-us">
 
-  {% include head.html %}
+{% include head.html %}
 
-  <body>
+<body class="theme-base-0d">
 
-    {% include sidebar.html %}
+  {% include sidebar.html %}
 
-    <!-- Wrap is the content to shift when toggling the sidebar. We wrap the
+  <!-- Wrap is the content to shift when toggling the sidebar. We wrap the
          content to avoid any CSS collisions with our real content. -->
-    <div class="wrap">
-      <div class="masthead">
-        <div class="container">
-          <h3 class="masthead-title">
-            <a href="{{ site.baseurl }}/" title="Home">{{ site.title }}</a>
-            <small>{{ site.tagline }}</small>
-          </h3>
-        </div>
-      </div>
-
-      <div class="container content">
-        {{ content }}
-      </div>
+<div class="wrap">
+  <div class="masthead">
+    <div class="container">
+      <h3 class="masthead-title">
+        <a href="{{ site.baseurl }}/" title="Home">{{ site.title }}</a>
+        <small>{{ site.tagline }}</small>
+      </h3>
     </div>
+  </div>
 
-    <label for="sidebar-checkbox" class="sidebar-toggle"></label>
+  <div class="container content">
+    {{ content }}
+  </div>
+</div>
 
-    <script src='{{ site.baseurl }}/public/js/script.js'></script>
-  </body>
+<label for="sidebar-checkbox" class="sidebar-toggle"></label>
+
+<script src='{{ site.baseurl }}/public/js/script.js'></script>
+</body>
+
+</html> -->
+
+
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ page.title }}</title>
+  <link rel="stylesheet" href="{{ '/css/poole.css' | relative_url }}">
+  <link rel="stylesheet" href="{{ '/css/lanyon.css' | relative_url }}">
+  <link rel="stylesheet" href="{{ '/css/syntax.css' | relative_url }}">
+  <link rel="stylesheet" href="{{ '/css/styles.css' | relative_url }}">
+</head>
+
+<body>
+  {%- include head.html -%}
+  {%- include sidebar.html -%}
+
+  {{ content }}
+
+  <script src="{{ '/js/script.js' | relative_url }}"></script>
+  <script src="{{ '/js/theme-toggle.js' | relative_url }}"></script>
+</body>
+
 </html>

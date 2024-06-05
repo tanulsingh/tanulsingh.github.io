@@ -32,9 +32,9 @@ sass:
 
 # Specify the author for blog posts
 author:
-  name: Mark Otto
+  name: Tanul Singh
   url: https://twitter.com/mdo
-  email: markdotto@gmail.com
+  email: tanulsingh077@gmail.com
 
 # Custom vars
 version: 3.0.0
