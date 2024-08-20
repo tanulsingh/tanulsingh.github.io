@@ -29,7 +29,7 @@ matrix multiplication . LongFormer tries to adopt the second method and presents
 
 # LongFormer Attention : Components
 
-![1_Z_GLLlF0cdhh_xATWscxlw.png]({{ site.baseurl }} LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8/1_Z_GLLlF0cdhh_xATWscxlw.png)
+![1_Z_GLLlF0cdhh_xATWscxlw.png]({{ site.baseurl }}/LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8/1_Z_GLLlF0cdhh_xATWscxlw.png)
 
 LongFormer proposes a sparsified form of self-attention , wherein ,they sparsify the full self-attention matrix according to an “attention pattern” specifying pairs of input locations attending to one another. Unlike the full self-attention, the proposed attention pattern scales linearly with the input sequence, making it efficient for longer sequences. Let’s look into the components of the **Attention Pattern** .
 
