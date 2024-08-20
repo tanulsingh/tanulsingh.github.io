@@ -7,12 +7,12 @@ title: LongFormer - The Long Document Transformer
 
 In this article we will deep dive into the **Longformer Paper** and look at all of its components in depth , exploring the results and techniques to use it efficiently . We will do our exploration in the following steps :-
 
-- [What Happened Before LongFormer?](#what-happened-before-longformer?)
-- [LongFormer Attention: Components](#longformer-attention-:-components)
+- [What Happened Before LongFormer?](#what-happened-before-longformer-?)
+- [LongFormer Attention: Components](#longformer-attention:-components)
   - [Sliding Window Attention](#sliding-window-attention)
   - [Dilated Sliding Window Attention](#dilated-sliding-window-attention)
   - [Global Attention](#global-attention)
-- [LongFormer Attention: Implementation](#longformer-attention-:-implementation)
+- [LongFormer Attention: Implementation](#longformer-attention:-implementation)
 - [Training Procedure](#training-procedure)
   - [Training Objective](#training-objective)
   - [Attention Pattern](#attention-pattern)
@@ -20,8 +20,7 @@ In this article we will deep dive into the **Longformer Paper** and look at all 
 - [Results](#results)
 - [Conclusion](#conclusion)
 
-![hqdefault.jpeg](/_posts/LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8/hqdefault.jpeg)
-
+![hqdefault.jpeg]{{ '/assets/images/longformer/hqdefault.jpeg' | absolute_url }}
 # What Happenend Before LongFormer?
 
 This is a question that would have come into your mind , that if not Longformer then what ? ***Before the LongFormer*** or even now , people often used ***chunking strategy*** , wherein , a long document is chunked into 512 token chunks with or without an overlapping window and are processed separately . While it is a good work around for Long Documents , this approach suffer from information loss due to truncation or cascading errors , especially when doing NER or Span Extraction where we need the whole context to understand and mark the labels correctly . Some other Task specific workarounds have also been explored , like sparse attention that defines some form of sparse attention pattern and avoids computing the full quadratic attention
