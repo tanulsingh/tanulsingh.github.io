@@ -20,7 +20,7 @@ In this article we will deep dive into the **Longformer Paper** and look at all 
 - [Results](LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8.md)
 - [Conclusion](LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8.md)
 
-![hqdefault.jpeg](LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8/hqdefault.jpeg)
+![hqdefault.jpeg]({{ site.baseurl }}/LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8/hqdefault.jpeg)
 
 # What Happenend Before LongFormer?
 
