@@ -1,4 +1,7 @@
-# LongFormer : The Long Document Transformer
+---
+layout: post
+title: LongFormer : The Long Document Transformer
+---
 
 **Transformer-Based Models** have become the go to models in about every NLP task since their inception, but when it comes to long documents they suffer from a drawback of **limited tokens** . Transformer-Based Models are unable to process long sequences due to their self attention which scales quadratically with the sequence length .  ****Longformer addresses this limitation and proposes an attention mechanism which scales linearly with sequence length, making it easy to process documents of thousands of tokens or longer.  Longformer’s attention mechanism is a drop-in replacement for the standard self-attention and combines a local windowed attention with a task motivated global attention (more on this later in this article) . 
 
