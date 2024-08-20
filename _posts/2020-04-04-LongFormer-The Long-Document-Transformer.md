@@ -20,7 +20,7 @@ In this article we will deep dive into the **Longformer Paper** and look at all 
 - [Results](#results)
 - [Conclusion](#conclusion)
 
-![hqdefault.jpeg]{{ '/assets/images/longformer/hqdefault.jpeg' | absolute_url }}
+![LongFormer Overview]({{ site.baseurl }}/assets/images/longformer/hqdefault.jpeg)
 # What Happenend Before LongFormer?
 
 This is a question that would have come into your mind , that if not Longformer then what ? ***Before the LongFormer*** or even now , people often used ***chunking strategy*** , wherein , a long document is chunked into 512 token chunks with or without an overlapping window and are processed separately . While it is a good work around for Long Documents , this approach suffer from information loss due to truncation or cascading errors , especially when doing NER or Span Extraction where we need the whole context to understand and mark the labels correctly . Some other Task specific workarounds have also been explored , like sparse attention that defines some form of sparse attention pattern and avoids computing the full quadratic attention
