@@ -7,20 +7,20 @@ title: LongFormer - The Long Document Transformer
 
 In this article we will deep dive into the **Longformer Paper** and look at all of its components in depth , exploring the results and techniques to use it efficiently . We will do our exploration in the following steps :-
 
-- [What Happenend Before LongFormer?](LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8.md)
-- [LongFormer Attention : Components](LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8.md)
-    - [Sliding Window Attention](LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8.md)
-    - [Dilated Sliding Window Attention](LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8.md)
-    - [Global Attention](LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8.md)
-- [LongFormer Attention : Implementation](LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8.md)
-- [Training Procedure and Results](LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8.md)
-    - [Training Objective](LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8.md)
-    - [Attention Pattern](LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8.md)
-    - [Position Embeddings](LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8.md)
-- [Results](LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8.md)
-- [Conclusion](LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8.md)
+- [What Happened Before LongFormer?](#what-happened-before-longformer)
+- [LongFormer Attention: Components](#longformer-attention-components)
+  - [Sliding Window Attention](#sliding-window-attention)
+  - [Dilated Sliding Window Attention](#dilated-sliding-window-attention)
+  - [Global Attention](#global-attention)
+- [LongFormer Attention: Implementation](#longformer-attention-implementation)
+- [Training Procedure and Results](#training-procedure-and-results)
+  - [Training Objective](#training-objective)
+  - [Attention Pattern](#attention-pattern)
+  - [Position Embeddings](#position-embeddings)
+- [Results](#results)
+- [Conclusion](#conclusion)
 
-![hqdefault.jpeg]({{ site.baseurl }}/LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8/hqdefault.jpeg)
+![hqdefault.jpeg]({{ site.baseurl }}/_posts/LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8/hqdefault.jpeg)
 
 # What Happenend Before LongFormer?
 
