@@ -28,7 +28,8 @@ matrix multiplication . LongFormer tries to adopt the second method and presents
 
 # LongFormer Attention : Components
 
-![1_Z_GLLlF0cdhh_xATWscxlw.png]({{ site.baseurl }}/LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8/1_Z_GLLlF0cdhh_xATWscxlw.png)
+![Attention Components]({{ site.baseurl }}/assets/images/longformer/1_Z_GLLlF0cdhh_xATWscxlw.png)
+
 
 LongFormer proposes a sparsified form of self-attention , wherein ,they sparsify the full self-attention matrix according to an “attention pattern” specifying pairs of input locations attending to one another. Unlike the full self-attention, the proposed attention pattern scales linearly with the input sequence, making it efficient for longer sequences. Let’s look into the components of the **Attention Pattern** .
 
@@ -36,15 +37,18 @@ LongFormer proposes a sparsified form of self-attention , wherein ,they sparsify
 
 A full-fledged Self-Attention allows the model to look at all the tokens in the input sentence but comes with a computational complexity . Below is an example of Full Self-Attention
 
-![IMG_20220213_173624__01.jpg](LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8/IMG_20220213_173624__01.jpg)
+![Full Self-Attention]({{ site.baseurl }}/assets/images/longformer/IMG_20220213_173624__01.jpg)
+
 
 In an attempt to reduce computational complexity without losing local context , Longformer proposes fixed-size window attention surrounding each token. **Given a fixed window size w, each token attends to 1/2w tokens on each side** as shown in figure below 
 
-![IMG_20220213_174607__01.jpg](LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8/IMG_20220213_174607__01.jpg)
+![Sliding Window Attention]({{ site.baseurl }}/assets/images/longformer/IMG_20220213_174607__01.jpg)
+
 
 Since there are n encoder layers stacked on top of each other in a typical Transformer-Base Network, using multiple stacked layers of such windowed attention results in a large receptive field, where top layers have access to all input locations and have the capacity to build representations that incorporate information across the entire input, similar to CNNs (see figure below) . Thus even though any token in the first layer can only see only w/2 tokens on both sides at the time , the topmost layers can see effectively look at L*W tokens , a simple example is shown in the example below
 
-![IMG_20220213_220940__01.jpg](LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8/IMG_20220213_220940__01.jpg)
+![Stacked Layers Receptive Field]({{ site.baseurl }}/assets/images/longformer/IMG_20220213_220940__01.jpg)
+
 
 The computation complexity of this pattern is O(n × w), which scales linearly with input sequence length n. *Even though this attention pattern results in a high receptive field at the top layers , one can tweak the attention width depending upon the type of problem being solved and compute power to increase the receptive field even further and guage more context* . 
 
@@ -93,7 +97,7 @@ The Authors pretrain Longformer using fairseq on a corpus of long documents that
 
 The Authors apply the trained **Longformer** on multiple long document tasks, including QA, coreference resolution and classification . Below Table contains the results for each of the three tasks . Longformer Base beats Roberta-base in each of the three long document tasks and achieves new SOTA for long documents . Its performance gain is especially obvious for tasks that require long context such as WikiHop and Hyperpartisan.
 
-![Screenshot 2022-02-16 at 12.30.49 PM.png](LongFormer%20The%20Long%20Document%20Transformer%20740c27d9ad964e13800c8f7136ca8ce8/Screenshot_2022-02-16_at_12.30.49_PM.png)
+![Results]({{ site.baseurl }}/assets/images/longformer/Screenshot_2022-02-16_at_12.30.49_PM.png)
 
 There are some tricks that the author have used to increase the performance for LongFormer 
 
