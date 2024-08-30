@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en" dir="auto">
+
+<head><script src="/index.html/livereload.js?mindelay=10&amp;v=2&amp;port=1313&amp;path=index.html/livereload" data-no-instant defer></script><meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+<meta name="robots" content="noindex, nofollow">
+<title>DeBerta is new the King | Mr. KnowNothing</title>
+<meta name="keywords" content="Microsoft Research, Paper Explanation, Transformer, Long Sequences, LLM">
+<meta name="description" content="Describes the working of Deberta , an encoder based Transformer model with Relative Position Encodings">
+<meta name="author" content="Tanul Singh">
+<link rel="canonical" href="http://localhost:1313/index.html/posts/deberta/">
+<link crossorigin="anonymous" href="/index.html/assets/css/stylesheet.715416d88b0677db0407a2fe9022bfa2c71651559807a1362c6d49f49a25252b.css" integrity="sha256-cVQW2IsGd9sEB6L&#43;kCK/oscWUVWYB6E2LG1J9JolJSs=" rel="preload stylesheet" as="style">
+<link rel="icon" href="http://localhost:1313/index.html/favicon.ico">
+<link rel="icon" type="image/png" sizes="16x16" href="http://localhost:1313/index.html/favicon-16x16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="http://localhost:1313/index.html/favicon-32x32.png">
+<link rel="apple-touch-icon" href="http://localhost:1313/index.html/apple-touch-icon.png">
+<meta name="theme-color" content="#2e2e33">
+<meta name="msapplication-TileColor" content="#2e2e33">
+<link rel="alternate" hreflang="en" href="http://localhost:1313/index.html/posts/deberta/">
+<noscript>
+    <style>
+        #theme-toggle,
+        .top-link {
+            display: none;
+        }
+
+    </style>
+</noscript><meta property="og:title" content="DeBerta is new the King" />
+<meta property="og:description" content="Describes the working of Deberta , an encoder based Transformer model with Relative Position Encodings" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="http://localhost:1313/index.html/posts/deberta/" />
+<meta property="og:image" content="http://localhost:1313/index.html/IMG_20220519_121338.jpg" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-02-12T00:00:00+00:00" />
+<meta property="article:modified_time" content="2022-02-12T00:00:00+00:00" />
+
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:image" content="http://localhost:1313/index.html/IMG_20220519_121338.jpg" />
+<meta name="twitter:title" content="DeBerta is new the King"/>
+<meta name="twitter:description" content="Describes the working of Deberta , an encoder based Transformer model with Relative Position Encodings"/>
+
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {
+      "@type": "ListItem",
+      "position":  1 ,
+      "name": "Courses",
+      "item": "http://localhost:1313/index.html/posts/"
+    }, 
+    {
+      "@type": "ListItem",
+      "position":  2 ,
+      "name": "DeBerta is new the King",
+      "item": "http://localhost:1313/index.html/posts/deberta/"
+    }
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  "headline": "DeBerta is new the King",
+  "name": "DeBerta is new the King",
+  "description": "Describes the working of Deberta , an encoder based Transformer model with Relative Position Encodings",
+  "keywords": [
+    "Microsoft Research", "Paper Explanation", "Transformer", "Long Sequences", "LLM"
+  ],
+  "articleBody": "NLP’s State completely changed when in 2018 , researchers from Google open sourced BERT (Bi-Directional Encoder Representation From Transformers) . The whole idea of going from a sequence to sequence transformer model to self-supervised training of just the encoder representation which can be used for downstream tasks such as classification was just mind blowing . Ever since that day efforts have been made to improve such encoder-based models in different ways so as to do better on NLP benchmarks . In 2019 , FacebookAI open-sourced RoBerta which has been ruling as a best performer for all tasks uptill now , but now the throne seems to be shifting towards the new king DeBerta released by Microsoft research in 2022 . Deberta-v3 has beaten Roberta by big margins not only in the recent NLP Kaggle competitions but also on big NLP benchmarks .\nIntroduction In this article, we will deep dive the Deberta paper by Pengcheng He et. al., 2020 and see how it improves over the SOTA Bert and RoBerta . We will also explore the results and techniques to use the model efficiently for downstream tasks.\nDeBerta get its name from the two novel techniques it introduces, through which it claims to improve over BERT and RoBerta :\nDisentangled Attention Mechanism Enhanced Mask Decoder Decoding-enhanced BERT with disentangled attention (DeBerta)\nNow to understand the above techniques , the first step is to understand how Roberta and other encoder-type network work , let’s call this context and discuss it in the next section\nGetting some Context In this section we will discuss the working and flow of three key techniques that Transformer based models introduced ➖\nPositional Encoding A Transformer-based model is composed of stacked Transformer Encoder Blocks. Each Block contains a multi-head self-attention layer followed by a fully connected positional feed-forward network . Introduction of feed forward neural network instead of Sequential RNN’s allowed for parallel execution of model but since they are not sequential , they were not able to incorporate the positional information of words (i.e which word belonged to which position) . In order to tackle this , the authors introduced the concept of Positional Encodings wherein they introduced positional vectors in addition to the word vectors and added them together to get the final vector representation for every word . Let us understand this through an example shown in the figure below\nFigure 1 : Embedding in Transformers In our example sentence “I am a good boy” , we assume the tokenisation to take place at word level for simplicity sake . So after tokenisation we will have the tokens as [ I , am , a , good , boy ] and their respective positions as [1 , 2, 3, 4, 5] . Now before sending out the tokens into the transfomer we convert them into vectors of certain dimension like we did for LSTM’s , but here the vector for each token is a sum of its word vector and position vector , so for token “I” the final vector will be (word_vector_of_i + position_vector_of_position_one) and similarly for all other tokens . Now the obtained vector is represented by a vector whose value depends on its content and position. Then the transformer while training is able to understand the position of the word by certain series of activations .\nIn the DeBerta paper , the authors argue that adding position embedding and word embedding together is not ideal because the positions are too much mixed with the signal of the content of the word . Thus it introduces a noise which leads to a lower performance and hence they propose Disentangled Attention mechanism in which they use two separate vectors for content and position and calculate attention using disentangled matrices using both vectors\nMulti-Headed Self Attention A standard self attention works by computing for every word from the input text an attention weight which gauges the influence each word has on another word . This attention mechanism uses an embedding vector which has position and context information mixed together which helps in understanding the absolute positions of the words . Each of the tokens in the input text produce Query(Qi’s) and Key (Ki’s) vectors , whose inner product then result in Attention Vector (Ai’s) . When we combine all queries and keys we get the Query Matrix and the Key matrix , there inner product gives us the attention matrix , where $Aij$ in Attention matrix represents the attention weight of $token_j$ on $token_i$ which guages the influence of $token_j$ on $token_i$\nHowever the self attention is not capable of naturally gauging the relative positions of the words . This is where the positional encoding comes in .Then we have multiple heads instead of a single head doing the same thing but on different part of the embeddings thereby allowing for learning of different representation of the same word .\nIn the DeBerta paper , the author claim that this is also not ideal and both positions and contents should have separate signals.\nMasked Language Based Self Supervised PreTraining With the Bert paper , authors came out with a self supervised pre-training technique that revolutionized NLP . They showed that a transformer model’s encoder can be trained using a Masked Language modelling Objective ( An Objective where in 15 percent of the tokens in an input sentence is masked and the model has to predict the masked tokens ) and Next Sentence Prediction to incorporate the knowledge of a Language and that pretrained model can be used for downstream tasks for that Language .\nThe Components of DeBerta Now that we have context of how the competitors work and its shortcomings, we can now dive deep into how DeBerta works and improves upon on the shortcomings of its predecessor.\nDisentangled Attention Mechanism Unlike BERT where each word in the input layer is represented using a vector which is the sum of its word embedding and position embedding , in DeBerta each word is represented using two vectors that encode its content and position respectively and the attention weights among words are computed using disentangled matrices. This is motivated by the observation that the attention weight of a word pair not only depends on there contents but their relative positions as well.\nIn BERT as explained above , every token produced a single Query and a Key vector and their inner product gave us the attention weights . Since every token there was presented by a single vector (H) the equation looked like :\n$Q=HW_q,K=HW_k,V=HW_v,A=\\frac{QK^T}{\\sqrt{d}},H_o = softmax(A)V$ ,\nwhere H represents the Hidden state or the embedding matrix for the whole input , $W_q$ represents a linear projection matrices for Query and key respectively and $A$ represents the Attention Matrix and $H_o$ the output of self-attention\nIn Deberta for a token at position $i$ in a sequence, it is represented using two vectors, ${H_i}$ and $P_{i|j}$ , which represent its content and its relative position with respect to the token $j$ . Let’s go back to our example in order to understand this better , In our example “I am a good boy” , if we have to calculate of how $token_2$ (”am”) attends to $token_5$ (”boy”) , we will first get two vectors from $token_2, H_2$ (word Vector for “am”) and $P_{2|+3}$ (Because Relative Position Vector of token Position 2 with respect to Position 5 is +3) . Let’s look at the picture below to understand better .\nGeneral Equation : $A_{i,j} = (H_i,P_{i,j})*(H_j,P_{j,i}) = H_i,H_j^T + H_i,P_{j,i}^T + P_{i,j}H_j^T + P_{i,j}*P_{j,i}^T$ where $A_{i,j}$ is Attention weight for $token_j$ when looking from $token_i$\nThis new Disentangled Attention is a sum of four components whereas previously in BERT and Roberta it used to be single term $H_i * H_j^T$ . Thus this mechanism is able to capture much more information than the standard self attention , Let’s look at the components\nContent to Content Content to Position Position to Content Position to Position Content to Content is similar to standard self attention , where each word looks at all the different words in the input text and try to gauge its importance on itself .\nContent to Position term can be interpreted as $token_i$ (”am” in our case) trying to find out which position around it is important to look at and from which position around it should request more information than others. For Eg: Let’s say the model has figured out already that “I” should come before “am” , thus now for token “am” , the information about “I” is not much useful now , using this term in attention , the word “am” can decide since I already the word before me will “I” thus I want to look at the words after myself.\nPosition to Content term can be interpreted as $token_i$ saying , I am at position $i$ , which words should I look at in the input sentence wrt this position $i$ so that I can be better at predicting masked tokens\nPosition to Position term is not that useful because we are talking about relative positions\n💡 One thing to Note here is that while the hidden layer embeddings change every layer , the relative positional embeddings remains the same and is taken the same at the every layer . Also the Relative Positions are clipped and only exists till +- k wrt some position Thus in this way ,By feeding in relative position information at each step and keeping it separate from context information, DeBerta is able to gather more information about the words as well as their relative positions .\nEnchanced Mask Decoding DeBERTa is pretrained using MLM similar to RoBERTa and BERT , where a model is trained to predict the randomly masked words in a sentence using the context from surrounding words . Since DeBERTa uses relative positions instead of Absolute positions of words , it is not able to efficiently transfer the context for the masked word prediction in some cases . For Eg : Given a sentence “a new store opened beside the new mall” with the words “store” and “mall” masked for prediction. Using only the local context (eg, relative positions and surrounding words) is insufficient for the model to distinguish between store and mall in this sentence , since both follow the word new with the same relative positions thus giving thereby giving the same context information about to two different words. To address this limitation , the model needs to take into account the absolute positions in addition to the relative positions , In order to do that the absolute positions information is added right after the transformer layers just before the softmax layer for masked token predictions . This is what they call as Enhanced Mask Decoding . The authors argue that in this way DeBERTa captures the relative positions in all the Transformer layers and only uses absolute positions as complementary information when decoding masked words. They also compare EMD with BERT’s architecture (where absolute positions are input at the first layer only) and observe that EMD works much better . They conjecture that the early incorporation of absolute positions used by BERT might undesirably hamper the model from learning sufficient information of relative positions .\nScale Invariant FineTuning In addition to some major component changes DeBERTa authors also pretrain the model using a new adversarial training algorithm , Scale Invariant FineTuning (SiFT) .\nVirtual Adversarial Training is a regularization method for improving models’ generalization. It does so by improving a model’s robustness to adversarial examples( examples which are completely different from training distribution) which are created by making small perturbations to the input . The model is regularized so that when given a task-specific example the model produces the same output distribution as it produces on an adversarial perturbation of that example .\nThe author propose SiFT that improves the training stability by applying the perturbations to the normalized word embeddings . Specifically when fine-tuning DeBERTa to a downstream NLP task , SiFT first normalizes the word embedding vectors into stochastic vectors and then applies the perturbations to the normalized embeddings vectors , this substaintially improves the performance of the fine-tuned models .\nConculsion This Paper presents a new Transformer Based Architecture DeBERTa which introduces two new novel parts which helps to improve significantly over RoBERTa and BERT on almost every NLP Task . DeBERTa has seen rising popularity over the coming year and new versions applying different pretraining techniques have been released by Microsoft as well . DeBERTa surpassing human performance on SuperGLUE marks an important milestone toward General AI , there much more improvements to come to this model.\nI tried to explain the components in as easy terms as possible , If you have enjoyed the blog, I will recommend reading the original paper.\n",
+  "wordCount" : "2141",
+  "inLanguage": "en",
+  "image":"http://localhost:1313/index.html/IMG_20220519_121338.jpg","datePublished": "2022-02-12T00:00:00Z",
+  "dateModified": "2022-02-12T00:00:00Z",
+  "author":{
+    "@type": "Person",
+    "name": "Tanul Singh"
+  },
+  "mainEntityOfPage": {
+    "@type": "WebPage",
+    "@id": "http://localhost:1313/index.html/posts/deberta/"
+  },
+  "publisher": {
+    "@type": "Organization",
+    "name": "Mr. KnowNothing",
+    "logo": {
+      "@type": "ImageObject",
+      "url": "http://localhost:1313/index.html/favicon.ico"
+    }
+  }
+}
+</script>
+
+
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css" integrity="sha384-wcIxkf4k558AjM3Yz3BBFQUbk/zgIYC2R0QpeeYb+TwlBVMrlgLqwRjRtGZiK7ww" crossorigin="anonymous">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js" integrity="sha384-hIoBPJpTUs74ddyc4bFZSM1TVlQDA60VBbJS0oA934VSz82sBx1X7kSx2ATBDIyd" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js" integrity="sha384-43gviWU0YVjaDtb/GhzOouOXtZMP/7XUzwPTstBeZFe/+rCMvRwr4yROQP43s0Xk" crossorigin="anonymous"
+  onload="renderMathInElement(document.body);"></script>
+
+<script>
+    document.addEventListener("DOMContentLoaded", function() {
+        renderMathInElement(document.body, {
+          delimiters: [
+            {left: '$$', right: '$$', display: true},
+            {left: '$', right: '$', display: false},
+            {left: "\\begin{equation}", right: "\\end{equation}", display: true},
+            {left: "\\begin{equation*}", right: "\\end{equation*}", display: true},
+            {left: "\\begin{align}", right: "\\end{align}", display: true},
+            {left: "\\begin{align*}", right: "\\end{align*}", display: true},
+            {left: "\\begin{alignat}", right: "\\end{alignat}", display: true},
+            {left: "\\begin{gather}", right: "\\end{gather}", display: true},
+            {left: "\\begin{CD}", right: "\\end{CD}", display: true},
+          ],
+          throwOnError : false
+        });
+    });
+</script>
+ 
+
+
+</head>
+
+<body class=" dark" id="top">
+
+<header class="header">
+    <nav class="nav">
+        <div class="logo">
+            <a href="http://localhost:1313/index.html/" accesskey="h" title="Tanul Singh">
+                <img src="http://localhost:1313/index.html/402A2908.JPG" alt="" aria-label="logo"
+                    height="20"
+                    width="20">Tanul Singh</a>
+            <div class="logo-switches">
+            </div>
+        </div>
+        <ul id="menu">
+            <li>
+                <a href="http://localhost:1313/index.html/" title="CV">
+                    <span>CV</span>
+                </a>
+            </li>
+            <li>
+                <a href="http://localhost:1313/index.html/posts/" title="Blog">
+                    <span>Blog</span>
+                </a>
+            </li>
+            <li>
+                <a href="http://localhost:1313/index.html/projects/" title="Personal Projects">
+                    <span>Personal Projects</span>
+                </a>
+            </li>
+            <li>
+                <a href="http://localhost:1313/index.html/data/" title="Archive">
+                    <span>Archive</span>
+                </a>
+            </li>
+        </ul>
+    </nav>
+</header>
+
+    <main class="main">
+
+<article class="post-single">
+  <header class="post-header">
+    
+    <h1 class="post-title entry-hint-parent">
+      DeBerta is new the King
+    </h1>
+    <div class="post-meta"><span title='2022-02-12 00:00:00 +0000 UTC'>February 2022</span>&nbsp;&middot;&nbsp;11 min&nbsp;&middot;&nbsp;Tanul Singh
+</div>
+  </header> <div class="toc">
+    <details  open>
+        <summary accesskey="c">
+            <span class="details">Table of Contents</span>
+        </summary>
+
+        <div class="inner"><nav id="TableOfContents">
+  <ul>
+    <li><a href="#introduction">Introduction</a></li>
+    <li><a href="#getting-some-context">Getting some Context</a></li>
+    <li><a href="#the-components-of-deberta">The Components of DeBerta</a></li>
+    <li><a href="#scale-invariant-finetuning">Scale Invariant FineTuning</a></li>
+    <li><a href="#conculsion">Conculsion</a></li>
+  </ul>
+</nav>
+        </div>
+    </details>
+</div>
+
+  <div class="post-content"><p>NLP’s State completely changed when in 2018 , researchers from Google open sourced BERT (Bi-Directional Encoder Representation From Transformers) . The whole idea of going from a sequence to sequence transformer model to self-supervised training of just the encoder representation which can be used for downstream tasks such as classification was just mind blowing . Ever since that day efforts have been made to improve such encoder-based models in different ways so as to do better on NLP benchmarks . In 2019 , FacebookAI open-sourced RoBerta which has been ruling as a best performer for all tasks uptill now , but now the throne seems to be shifting towards the new king DeBerta released by Microsoft research in 2022 . Deberta-v3 has beaten Roberta by big margins not only in the recent NLP Kaggle competitions but also on big NLP benchmarks .</p>
+<h2 id="introduction">Introduction<a hidden class="anchor" aria-hidden="true" href="#introduction">#</a></h2>
+<p>In this article, we will deep dive the <a href="https://arxiv.org/pdf/2006.03654.pdf" target="_blank">Deberta paper</a>
+  by Pengcheng He et. al., 2020 and see how it improves over the SOTA Bert and RoBerta . We will also explore the results and techniques to use the model efficiently for downstream tasks.</p>
+<p>DeBerta get its <strong>name</strong> from the two novel techniques it introduces, through which it claims to improve over BERT and RoBerta :</p>
+<ul>
+<li>Disentangled Attention Mechanism</li>
+<li>Enhanced Mask Decoder</li>
+</ul>
+<p><strong>Decoding-enhanced BERT with disentangled attention</strong> (DeBerta)</p>
+<p>Now to understand the above techniques , the first step is to understand how Roberta and other encoder-type network work , let’s call this context and discuss it in the next section</p>
+<h2 id="getting-some-context">Getting some Context<a hidden class="anchor" aria-hidden="true" href="#getting-some-context">#</a></h2>
+<p>In this section we will discuss the working and flow of three key techniques that Transformer based models introduced ➖</p>
+<h3 id="positional-encoding">Positional Encoding<a hidden class="anchor" aria-hidden="true" href="#positional-encoding">#</a></h3>
+<p>A Transformer-based model is composed of stacked Transformer Encoder Blocks. Each Block contains a multi-head self-attention layer followed by a fully connected positional feed-forward network . Introduction of feed forward neural network instead of Sequential RNN’s allowed for parallel execution of model but since they are not sequential , they were not able to incorporate the positional information of words (i.e which word belonged to which position) . In order to tackle this , the authors introduced the concept of Positional Encodings wherein they introduced positional vectors in addition to the word vectors and added them together to get the final vector representation for every word . Let us understand this through an example shown in the figure below</p>
+<p><img loading="lazy" src="Screenshot_2022-05-19_at_12.28.12_PM.png" alt="Figure 1 : Embedding in Transformers"  />
+</p>
+<pre><code>Figure 1 : Embedding in Transformers
+</code></pre>
+<p>In our example sentence “I am a good boy” , we assume the tokenisation to take place at word level for simplicity sake . So after tokenisation we will have the tokens as [ I , am , a , good , boy ] and their respective positions as [1 , 2, 3, 4, 5] . Now before sending out the tokens into the transfomer we convert them into vectors of certain dimension like we did for LSTM’s , but here the vector for each token is a sum of its word vector and position vector , so for token “I” the final vector will be (word_vector_of_i + position_vector_of_position_one) and similarly for all other tokens . Now the obtained vector is represented by a vector whose value depends on its content and position. Then the transformer while training is able to understand the position of the word by certain series of activations .</p>
+<p>In the DeBerta paper , the authors argue that adding position embedding and word embedding together is not ideal because the positions are too much mixed with the signal of the content of the word . Thus it introduces a noise which leads to a lower performance and hence they propose Disentangled Attention mechanism in which they use two separate vectors for content and position and calculate attention using disentangled matrices using both vectors</p>
+<h3 id="multi-headed-self-attention">Multi-Headed Self Attention<a hidden class="anchor" aria-hidden="true" href="#multi-headed-self-attention">#</a></h3>
+<p>A standard self attention works by computing for every word from the input text an attention weight which gauges the influence each word has on another word . This attention mechanism uses an embedding vector which has position and context information mixed together which helps in understanding the absolute positions of the words . Each of the tokens in the input text produce Query(Qi’s) and Key (Ki’s) vectors , whose inner product then result in Attention Vector (Ai’s) . When we combine all queries and keys we get the Query Matrix and the Key matrix , there inner product gives us the attention matrix , where $Aij$ in Attention matrix represents the attention weight of  $token_j$ on $token_i$ which guages the influence of $token_j$ on $token_i$</p>
+<p><img loading="lazy" src="Screenshot_2022-05-19_at_5.47.10_PM.png" alt="Screenshot 2022-05-19 at 5.47.10 PM.png"  />
+</p>
+<p>However the self attention is not capable of naturally gauging the relative positions of the words . This is where the positional encoding comes in .Then we have multiple heads instead of a single head doing the same thing but on different part of the embeddings thereby allowing for learning of different representation of the same word .</p>
+<p>In the DeBerta paper , the author claim that this is also not ideal and both positions and contents should have separate signals.</p>
+<h3 id="masked-language-based-self-supervised-pretraining">Masked Language Based Self Supervised PreTraining<a hidden class="anchor" aria-hidden="true" href="#masked-language-based-self-supervised-pretraining">#</a></h3>
+<p>With the Bert paper , authors came out with a self supervised pre-training technique that revolutionized NLP <strong>.</strong> They showed that a transformer model’s encoder can be trained using a Masked Language modelling Objective ( An Objective where in 15 percent of the tokens in an input sentence is masked and the model has to predict the masked tokens ) and Next Sentence Prediction to incorporate the knowledge of a Language and that pretrained model can be used for downstream tasks for that Language .</p>
+<h2 id="the-components-of-deberta">The Components of DeBerta<a hidden class="anchor" aria-hidden="true" href="#the-components-of-deberta">#</a></h2>
+<p><img loading="lazy" src="attention_map_02_1.png" alt="attention_map_02_1.png"  />
+</p>
+<p>Now that we have context of how the competitors work and its shortcomings, we can now dive deep into how DeBerta works and improves upon on the shortcomings of its predecessor.</p>
+<h3 id="disentangled-attention-mechanism">Disentangled Attention Mechanism<a hidden class="anchor" aria-hidden="true" href="#disentangled-attention-mechanism">#</a></h3>
+<p>Unlike BERT where each word in the input layer is represented using a vector which is the sum of its word embedding and position embedding , in DeBerta each word is represented using two vectors that encode its content and position respectively and the attention weights among words are computed using disentangled matrices. This is motivated by the observation that the attention weight of a word pair not only depends on there contents but their relative positions as well.</p>
+<p>In BERT as explained above , every token produced a single Query and a Key vector and their inner product gave us the attention weights . Since every token there was presented by a single vector (H) the equation looked like :</p>
+<p>$Q=HW_q,K=HW_k,V=HW_v,A=\frac{QK^T}{\sqrt{d}},H_o = softmax(A)V$ ,</p>
+<p>where H represents the Hidden state or the embedding matrix for the whole input , $W_q$  represents a linear projection matrices for Query and key respectively and $A$ represents the Attention Matrix and $H_o$ the output of self-attention</p>
+<p><strong>In Deberta</strong> for a token at position $i$ in a sequence, it is represented using two vectors, ${H_i}$ and $P_{i|j}$ , which represent its content and its relative position with respect to the token $j$ . Let’s go back to our example in order to understand this better , In our example “I am a good boy” , if we have to calculate of how $token_2$ (”am”) attends to $token_5$ (”boy”) , we will first get two vectors from $token_2, H_2$ (word Vector for “am”) and $P_{2|+3}$ (Because Relative Position Vector of token Position 2 with respect to Position 5 is +3) . Let’s look at the picture below to understand better .</p>
+<p><img loading="lazy" src="IMG_20220519_203223__01.jpg" alt="IMG_20220519_203223__01.jpg"  />
+</p>
+<p>General Equation :
+$A_{i,j} = (H_i,P_{i,j})*(H_j,P_{j,i}) = H_i,H_j^T + H_i,P_{j,i}^T + P_{i,j}H_j^T + P_{i,j}*P_{j,i}^T$     where $A_{i,j}$ is Attention weight for $token_j$ when looking from $token_i$</p>
+<p>This new Disentangled Attention is a sum of four components whereas previously in BERT and Roberta it used to be single term $H_i * H_j^T$ . Thus this mechanism is able to capture much more information than the standard self attention , Let’s look at the components</p>
+<ul>
+<li>Content to Content</li>
+<li>Content to Position</li>
+<li>Position to Content</li>
+<li>Position to Position</li>
+</ul>
+<p><strong>Content to Content</strong> is similar to standard self attention , where each word looks at all the different words in the input text and try to gauge its importance on itself .</p>
+<p><strong>Content to Position</strong> term can be interpreted as $token_i$ (”am” in our case) trying to find out which position around it is important to look at and from which position around it should request more information than others. <em>For Eg</em>: Let’s say the model has figured out already that “I” should come before “am” , thus now for token “am” , the information about “I” is not much useful now , using this term in attention , the word “am” can decide since I already the word before me will “I” thus I want to look at the words after myself.</p>
+<p><strong>Position to Content</strong> term can be interpreted as $token_i$ saying , I am at position $i$ , which words should I look at in the input sentence wrt this position $i$ so that I can be better at predicting masked tokens</p>
+<p><strong>Position to Position</strong> term is not that useful because we are talking about relative positions</p>
+<aside>
+💡 One thing to Note here is that while the hidden layer embeddings change every layer , the relative positional embeddings remains the same and is taken the same at the every layer . Also the Relative Positions are clipped and only exists till +- k wrt some position
+</aside>
+<p>Thus in this way ,By feeding in relative position information at each step and keeping it separate from context information, DeBerta is able to gather more information about the words as well as their relative positions .</p>
+<h3 id="enchanced-mask-decoding">Enchanced Mask Decoding<a hidden class="anchor" aria-hidden="true" href="#enchanced-mask-decoding">#</a></h3>
+<p>DeBERTa is pretrained using MLM similar to RoBERTa and BERT , where a model is trained to predict the randomly masked words in a sentence using the context from surrounding words . Since DeBERTa uses relative positions instead of Absolute positions of words , it is not able to efficiently transfer the context for the masked word prediction in some cases . For Eg : Given a sentence “a new <strong>store</strong> opened beside the new <strong>mall</strong>” with the words “<strong>store</strong>” and “<strong>mall</strong>” masked for prediction. Using only the local context (eg, relative positions and surrounding words) is insufficient for the model to distinguish between <em>store</em> and <em>mall</em> in this sentence , since both follow the word new with the same relative positions thus giving thereby giving the same context information about to two different words. To address this limitation , the model needs to take into account the absolute positions in addition to the relative positions , In order to do that the absolute positions information is added right after the transformer layers just before the softmax layer for masked token predictions . This is what they call as <em><strong>Enhanced Mask Decoding .</strong></em> The authors argue that in this way DeBERTa captures the relative positions in all the Transformer layers and only uses absolute positions as complementary information when decoding masked words. They also compare EMD with BERT’s architecture (where absolute positions are input at the first layer only) and observe that EMD works much better . They conjecture that the early incorporation of absolute positions used by BERT might undesirably hamper the model from learning sufficient information of relative positions .</p>
+<h2 id="scale-invariant-finetuning">Scale Invariant FineTuning<a hidden class="anchor" aria-hidden="true" href="#scale-invariant-finetuning">#</a></h2>
+<p>In addition to some major component changes DeBERTa authors also pretrain the model using a new adversarial training algorithm , Scale Invariant FineTuning (SiFT) .</p>
+<p>Virtual Adversarial Training is a regularization method for improving models’ generalization. It does so by improving a model’s robustness to adversarial examples( examples which are completely different from training distribution) which are created by making small perturbations to the input . The model is regularized so that when given a task-specific example the model produces the same output distribution as it produces on an adversarial perturbation of that example .</p>
+<p>The author propose SiFT that improves the training stability by applying the perturbations to the normalized word embeddings . Specifically when fine-tuning DeBERTa to a downstream NLP task , SiFT first normalizes the word embedding vectors into stochastic vectors and then applies the perturbations to the normalized embeddings vectors , this substaintially improves the performance of the fine-tuned models .</p>
+<h2 id="conculsion">Conculsion<a hidden class="anchor" aria-hidden="true" href="#conculsion">#</a></h2>
+<p>This Paper presents a new Transformer Based Architecture DeBERTa which introduces two new novel parts which helps to improve significantly over RoBERTa and BERT on almost every NLP Task . DeBERTa has seen rising popularity over the coming year and new versions applying different pretraining techniques have been released by Microsoft as well . DeBERTa surpassing human performance on SuperGLUE marks an important milestone toward General AI , there much more improvements to come to this model.</p>
+<p>I tried to explain the components in as easy terms as possible , If you have enjoyed the blog, I will recommend reading the original paper.</p>
+
+
+  </div>
+
+  <footer class="post-footer">
+    <ul class="post-tags">
+      <li><a href="http://localhost:1313/index.html/tags/microsoft-research/">Microsoft Research</a></li>
+      <li><a href="http://localhost:1313/index.html/tags/paper-explanation/">Paper Explanation</a></li>
+      <li><a href="http://localhost:1313/index.html/tags/transformer/">Transformer</a></li>
+      <li><a href="http://localhost:1313/index.html/tags/long-sequences/">Long Sequences</a></li>
+      <li><a href="http://localhost:1313/index.html/tags/llm/">LLM</a></li>
+    </ul>
+  </footer>
+</article>
+    </main>
+    
+<footer class="footer">
+    <span>&copy; 2024 <a href="http://localhost:1313/index.html/">Mr. KnowNothing</a></span> ·     
+    <span>
+    Powered by 
+        <a href="https://gohugo.io/" rel="noopener noreferrer" target="_blank">Hugo</a> &
+        <a href="https://github.com/pmichaillat/hugo-website/" rel="noopener" target="_blank">a modified version</a>
+         of 
+        <a href="https://github.com/adityatelange/hugo-PaperMod/" rel="noopener" target="_blank">PaperMod</a>
+    </span>
+</footer>
+
+<script>
+    let menu = document.getElementById('menu')
+    if (menu) {
+        menu.scrollLeft = localStorage.getItem("menu-scroll-position");
+        menu.onscroll = function () {
+            localStorage.setItem("menu-scroll-position", menu.scrollLeft);
+        }
+    }
+
+    document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+        anchor.addEventListener("click", function (e) {
+            e.preventDefault();
+            var id = this.getAttribute("href").substr(1);
+            if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+                document.querySelector(`[id='${decodeURIComponent(id)}']`).scrollIntoView({
+                    behavior: "smooth"
+                });
+            } else {
+                document.querySelector(`[id='${decodeURIComponent(id)}']`).scrollIntoView();
+            }
+            if (id === "top") {
+                history.replaceState(null, null, " ");
+            } else {
+                history.pushState(null, null, `#${id}`);
+            }
+        });
+    });
+
+</script>
+<script>
+    document.querySelectorAll('pre > code').forEach((codeblock) => {
+        const container = codeblock.parentNode.parentNode;
+
+        const copybutton = document.createElement('button');
+        copybutton.classList.add('copy-code');
+        copybutton.innerHTML = 'copy';
+
+        function copyingDone() {
+            copybutton.innerHTML = 'copied!';
+            setTimeout(() => {
+                copybutton.innerHTML = 'copy';
+            }, 2000);
+        }
+
+        copybutton.addEventListener('click', (cb) => {
+            if ('clipboard' in navigator) {
+                navigator.clipboard.writeText(codeblock.textContent);
+                copyingDone();
+                return;
+            }
+
+            const range = document.createRange();
+            range.selectNodeContents(codeblock);
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            try {
+                document.execCommand('copy');
+                copyingDone();
+            } catch (e) { };
+            selection.removeRange(range);
+        });
+
+        if (container.classList.contains("highlight")) {
+            container.appendChild(copybutton);
+        } else if (container.parentNode.firstChild == container) {
+            
+        } else if (codeblock.parentNode.parentNode.parentNode.parentNode.parentNode.nodeName == "TABLE") {
+            
+            codeblock.parentNode.parentNode.parentNode.parentNode.parentNode.appendChild(copybutton);
+        } else {
+            
+            codeblock.parentNode.appendChild(copybutton);
+        }
+    });
+</script>
+</body>
+</html>
