@@ -5,7 +5,7 @@
     margin-inline-start: auto;
     margin-inline-end: auto;
     line-height: var(--header-height);
-    background: var(--code-bg);
+    /* background: var(--code-bg); */
 }
 
 .nav a {
@@ -27,7 +27,8 @@
     font-weight: var(--semibold);
 }
 
-.logo a img, .logo a svg {
+.logo a img,
+.logo a svg {
     display: inline;
     vertical-align: middle;
     pointer-events: none;
@@ -57,7 +58,7 @@ body:not(.dark) #sun {
     white-space: nowrap;
 }
 
-#menu li + li {
+#menu li+li {
     margin-inline-start: var(--gap);
 }
 

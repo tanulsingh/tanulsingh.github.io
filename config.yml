@@ -12,7 +12,7 @@ taxonomies:
 menu:
     main:
         - name: CV
-          url: ""
+          url: cv.pdf
           weight: 1
         - name: Blog
           url: posts/
@@ -21,11 +21,11 @@ menu:
           url: projects/
           weight: 3
         - name: Archive
-          url: data/
+          url: archive/
           weight: 4
 
 params:
-    description: "I am a Professor of Philology at the Institute of Romance Philology in Regensburg, Germany. My research focuses mostly on Portuguese irregular verbs."
+    description: ""
     author: Tanul Singh
     # googleAnalyticsID: "G-XXXXX"
     DateFormat: "January 2006"
@@ -51,14 +51,16 @@ params:
     profileMode:
           enabled: true
           title: Tanul Singh
-          subtitle: "I am a Professor in the Institute of Romance Philology at the University of Regensburg, Germany. My research focuses on Portuguese irregular verbs. I was a doctoral student of Professor Dr Dieter Vogelsang in Munich, and later a second assistant of Professor Walter Schoeffler-Henschell at the University of Wiesbaden."
+          subtitle: "I am a Lead Machine Learning Engineer with 4 years of experience primarily working in the field of NLP,
+          LLMs and GenAI. I have a proven track record of building NLP systems, training and deploying Large Language models at scale.
+          "
           imageUrl: "402A2908.JPG"
           imageWidth: 160
           imageHeight: 155
           imageTitle: Tanul Singh
           buttons:
             - name: CV
-              url: 
+              url: cv.pdf
             - name: Blog
               url: posts/
             - name: Personal Projects
@@ -67,26 +69,17 @@ params:
               url: archive/
 
     socialIcons:
-        - name: CV
-          url: cv.pdf
-        - name: Email
-          url: mailto:moritz.maria.von.igelfeld@gmail.com
-        - name: Zoom
-          url: https://www.zoom.us/my/igelfeld
-        - name: Location
-          url: location/
-        - name: Office Hours
-          url: officehours/
-        - name: Google Scholar
-          url: https://scholar.google.com/citations?user=cL23w-4AAAAJ
         - name: GitHub
-          url: https://github.com/pmichaillat
-        - name: Substack
-          url: https://pmichaillat.substack.com
-        - name: YouTube
-          url: https://www.youtube.com/@alexandermccallsmithoffici9000
+          url: https://github.com/tanulsingh
+        - name: LinkedIn
+          url: https://www.linkedin.com/in/tanul-singh/
+        - name: Kaggle
+          url: https://www.kaggle.com/tanulsingh077
         - name: Twitter
-          url: https://twitter.com/McCallSmith
+          url: https://x.com/singh_tanul
+        - name: Email
+          url: mailto:tanulsingh0077@gmail.com
+        
 
     assets:
         disableScrollBarStyle: true
