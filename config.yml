@@ -20,9 +20,12 @@ menu:
         - name: Personal Projects
           url: projects/
           weight: 3
+        - name: About
+          url: about/
+          weight: 4
         - name: Archive
           url: archive/
-          weight: 4
+          weight: 5
 
 params:
     description: ""
@@ -31,7 +34,7 @@ params:
     DateFormat: "January 2006"
     defaultTheme: dark
     hideFooter: false
-    disableThemeToggle: true
+    disableThemeToggle: false
     ShowShareButtons: false
     ShowReadingTime: true
     disableSpecial1stPost: true
@@ -63,6 +66,8 @@ params:
               url: posts/
             - name: Personal Projects
               url: projects/
+            - name: About
+              url: about/
             - name: Archive
               url: archive/
 
