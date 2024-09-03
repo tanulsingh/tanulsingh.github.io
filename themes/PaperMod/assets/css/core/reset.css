@@ -50,7 +50,7 @@ h3,
 h4,
 h5,
 h6 {
-    line-height: 1.2;
+    line-height: 1.5;
 }
 
 h1,
@@ -60,8 +60,8 @@ h4,
 h5,
 h6,
 p {
-    margin-top: 0;
-    margin-bottom: 0;
+    margin-top: 10px;
+    margin-bottom: 5px;
 }
 
 ul {
@@ -75,7 +75,7 @@ a {
 body,
 figure,
 ul {
-    margin: 0;
+    margin: 10;
 }
 
 table {

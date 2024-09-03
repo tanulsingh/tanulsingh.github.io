@@ -1,23 +1,23 @@
 <!DOCTYPE html>
 <html lang="en" dir="auto">
 
-<head><meta charset="utf-8">
+<head><script src="/public/livereload.js?mindelay=10&amp;v=2&amp;port=1313&amp;path=public/livereload" data-no-instant defer></script><meta charset="utf-8">
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
-<meta name="robots" content="index, follow">
+<meta name="robots" content="noindex, nofollow">
 <title>LongFormer : The Long Document Transformer | Mr. KnowNothing</title>
 <meta name="keywords" content="Transformer, Long Sequences, LLM">
 <meta name="description" content="Describes the working of Longformer , an encoder based Transformer model for Long Sequences">
 <meta name="author" content="Tanul Singh">
-<link rel="canonical" href="https://tanulsingh.github.io/public/posts/longformer/">
-<link crossorigin="anonymous" href="/public/assets/css/stylesheet.4e9cacf86b1a6449f6ee75c7e225f99413f66b2f609ce3aa347e57737fd57173.css" integrity="sha256-Tpys&#43;GsaZEn27nXH4iX5lBP2ay9gnOOqNH5Xc3/VcXM=" rel="preload stylesheet" as="style">
-<link rel="icon" href="https://tanulsingh.github.io/public/favicon.ico">
-<link rel="icon" type="image/png" sizes="16x16" href="https://tanulsingh.github.io/public/favicon-16x16.png">
-<link rel="icon" type="image/png" sizes="32x32" href="https://tanulsingh.github.io/public/favicon-32x32.png">
-<link rel="apple-touch-icon" href="https://tanulsingh.github.io/public/apple-touch-icon.png">
+<link rel="canonical" href="http://localhost:1313/public/posts/longformer/">
+<link crossorigin="anonymous" href="/public/assets/css/stylesheet.9582d2fb18d12de703f44895f3cef0aca7d979888a531d4af9619f351a041354.css" integrity="sha256-lYLS&#43;xjRLecD9EiV887wrKfZeYiKUx1K&#43;WGfNRoEE1Q=" rel="preload stylesheet" as="style">
+<link rel="icon" href="http://localhost:1313/public/favicon.ico">
+<link rel="icon" type="image/png" sizes="16x16" href="http://localhost:1313/public/favicon-16x16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="http://localhost:1313/public/favicon-32x32.png">
+<link rel="apple-touch-icon" href="http://localhost:1313/public/apple-touch-icon.png">
 <meta name="theme-color" content="#2e2e33">
 <meta name="msapplication-TileColor" content="#2e2e33">
-<link rel="alternate" hreflang="en" href="https://tanulsingh.github.io/public/posts/longformer/">
+<link rel="alternate" hreflang="en" href="http://localhost:1313/public/posts/longformer/">
 <noscript>
     <style>
         #theme-toggle,
@@ -29,13 +29,13 @@
 </noscript><meta property="og:title" content="LongFormer : The Long Document Transformer" />
 <meta property="og:description" content="Describes the working of Longformer , an encoder based Transformer model for Long Sequences" />
 <meta property="og:type" content="article" />
-<meta property="og:url" content="https://tanulsingh.github.io/public/posts/longformer/" />
-<meta property="og:image" content="https://tanulsingh.github.io/public/longformer.jpg" /><meta property="article:section" content="posts" />
+<meta property="og:url" content="http://localhost:1313/public/posts/longformer/" />
+<meta property="og:image" content="http://localhost:1313/public/longformer.jpg" /><meta property="article:section" content="posts" />
 <meta property="article:published_time" content="2022-02-12T00:00:00+00:00" />
 <meta property="article:modified_time" content="2022-02-12T00:00:00+00:00" />
 
 <meta name="twitter:card" content="summary_large_image" />
-<meta name="twitter:image" content="https://tanulsingh.github.io/public/longformer.jpg" />
+<meta name="twitter:image" content="http://localhost:1313/public/longformer.jpg" />
 <meta name="twitter:title" content="LongFormer : The Long Document Transformer"/>
 <meta name="twitter:description" content="Describes the working of Longformer , an encoder based Transformer model for Long Sequences"/>
 
@@ -49,13 +49,13 @@
       "@type": "ListItem",
       "position":  1 ,
       "name": "Courses",
-      "item": "https://tanulsingh.github.io/public/posts/"
+      "item": "http://localhost:1313/public/posts/"
     }, 
     {
       "@type": "ListItem",
       "position":  2 ,
       "name": "LongFormer : The Long Document Transformer",
-      "item": "https://tanulsingh.github.io/public/posts/longformer/"
+      "item": "http://localhost:1313/public/posts/longformer/"
     }
   ]
 }
@@ -73,7 +73,7 @@
   "articleBody": "Transformer-Based Models have become the go to models in about every NLP task since their inception, but when it comes to long documents they suffer from a drawback of limited tokens . Transformer-Based Models are unable to process long sequences due to their self attention which scales quadratically with the sequence length . Longformer addresses this limitation and proposes an attention mechanism which scales linearly with sequence length, making it easy to process documents of thousands of tokens or longer. Longformer’s attention mechanism is a drop-in replacement for the standard self-attention and combines a local windowed attention with a task motivated global attention (more on this later in this article) .\nIn this article we will deep dive into the Longformer Paper and look at all of its components in depth , exploring the results and techniques to use it efficiently.\nWhat Happenend Before LongFormer? This is a question that would have come into your mind , that if not Longformer then what ? Before the LongFormer or even now , people often used chunking strategy , wherein , a long document is chunked into 512 token chunks with or without an overlapping window and are processed separately . While it is a good work around for Long Documents , this approach suffer from information loss due to truncation or cascading errors , especially when doing NER or Span Extraction where we need the whole context to understand and mark the labels correctly . Some other Task specific workarounds have also been explored , like sparse attention that defines some form of sparse attention pattern and avoids computing the full quadratic attention matrix multiplication . LongFormer tries to adopt the second method and presents a new SOTA for Long Documents\nLongFormer Attention : Components LongFormer proposes a sparsified form of self-attention , wherein ,they sparsify the full self-attention matrix according to an “attention pattern” specifying pairs of input locations attending to one another. Unlike the full self-attention, the proposed attention pattern scales linearly with the input sequence, making it efficient for longer sequences. Let’s look into the components of the Attention Pattern .\nSliding Window Attention A full-fledged Self-Attention allows the model to look at all the tokens in the input sentence but comes with a computational complexity . Below is an example of Full Self-Attention\nIn an attempt to reduce computational complexity without losing local context , Longformer proposes fixed-size window attention surrounding each token. Given a fixed window size w, each token attends to 1/2w tokens on each side as shown in figure below\nSince there are n encoder layers stacked on top of each other in a typical Transformer-Base Network, using multiple stacked layers of such windowed attention results in a large receptive field, where top layers have access to all input locations and have the capacity to build representations that incorporate information across the entire input, similar to CNNs (see figure below) . Thus even though any token in the first layer can only see only w/2 tokens on both sides at the time , the topmost layers can see effectively look at L*W tokens , a simple example is shown in the example below\nThe computation complexity of this pattern is O(n × w), which scales linearly with input sequence length n. Even though this attention pattern results in a high receptive field at the top layers , one can tweak the attention width depending upon the type of problem being solved and compute power to increase the receptive field even further and guage more context .\nDilated Sliding Window Attention To further increase the receptive field without increasing computation, the sliding window can be “dilated” . This is analogous to dilated CNNs where the window has gaps of size dilation d . In the similar example as above we can have a window attention with dilation d that means we will attend to words with a difference of d within a window w+d , thereby increasing the number of tokens the model can see at a time . Assuming a fixed d and w for all layers, the receptive field is L × d × w, which can reach tens of thousands of tokens even for small values of d.\nGlobal Attention While the windowed attention solves the problem of complexity and captures local context , it still lacks the flexibility to learn task-specific representations . Longformer thus allows few tokens to attend globally in a symmetric way that is, a token with a global attention attends to all tokens across the sequence, and all tokens in the sequence attend to it. For example for classification, global attention is used for the [CLS] token while in QA global attention is provided on all question tokens. While specifying global attention is task specific, it is a easy way to add inductive bias to the model’s attention.\nLonFormer Attention : Implementation Now that we have a good understanding of all components of LongFormer Attention and its pattern , we will look at its implementation. Transformer model computes attention scores as follows:\n$Attention(Q, K, V ) = softmax(QKT√dk) V$ (1)\nLongformer uses two sets of projections, Qs, Ks, Vs to compute attention scores of sliding window attention, and Qg, Kg, Vg to compute attention scores for the global attention. The additional projections provide flexibility to model the different types of attention, which is critical for best performance on downstream tasks. In Equation (1) ,The expensive operation is the matrix multiplication QKT because both Q and K have n (sequence length) projections. For Longformer, the dilated sliding window attention computes only a fixed number of the diagonals of QKT. This results in a linear increase in memory usage compared to quadratic increase for full self-attention.\nNote : LongFormer Attention Pattern can be used as a drop in replacement and can be plucked into any pretrained transformer model without the need to change the model architecture .\nTraining Procedure According to the authors , one of their main motivations is to develop a Pretrained Model which can be suitably used for downstream tasks for long documents and is suitable . To do so they pretrain the Longformer model on a document corpus and finetune it for six tasks, including classification, QA and coreference resolution. The resulting model can process sequences up to 4,096 tokens long (8 times longer than BERT)\nTraining Objective They pretrain Longformer with masked language modeling (MLM) objective similar to BERT, where the goal is to recover randomly masked tokens in a sequence. Since MLM pretraining is expensive, they continue pretraining from the RoBERTa released checkpoint, while only making the minimal changes necessary to support Longformer’s attention mechanism\nAttention Pattern They use sliding window attention with window size of 512, therefore using the same amount of computation as RoBERTa.\nPosition Embeddings RoBERTa uses learned absolute position embeddings with the maximum position being 512. To support longer documents, they add extra position embeddings to support up to position 4,096. To leverage RoBERTa’s pretrained weights, instead of randomly initializing the new position embeddings, they initialize them by copying the 512 position embeddings from RoBERTa multiple times\nContinued MLM PreTraining The Authors pretrain Longformer using fairseq on a corpus of long documents that they compiled. They train two model sizes, a base model and a large model. Both models are trained for 65K gradient updates with sequences length 4,096, batch size 64 (218 tokens), maximum learning rate of 3e-5, linear warmup of 500 steps, followed by a power 3 polynomial decay. The rest of the hyperparameters are the same as RoBERTa.\nResults The Authors apply the trained Longformer on multiple long document tasks, including QA, coreference resolution and classification . Below Table contains the results for each of the three tasks . Longformer Base beats Roberta-base in each of the three long document tasks and achieves new SOTA for long documents . Its performance gain is especially obvious for tasks that require long context such as WikiHop and Hyperpartisan.\nThere are some tricks that the author have used to increase the performance for LongFormer\nDifferential Attention Window : As explained every layer in LongFormer only looks at the tokens in the attention window , given that there is performance vs compute tradeoff by increasing or decreasing those attention window . The LongFormer authors use large attention window on the top layers and bottom attention window on the lower layers , the intuition being bottom layer mine the syntactic and semantic information while the top layers mine task specific information Global Attention : Global attention helps the LongFormer to learn the inductive bias for the task , hence choosing the tokens to attend to globally can really enhance performance .The authors demonstrate this by using global attention on Questions in Q/A Task and on CLF token in Classification Task. Conclusion LongFormer effectively presents an Attention Mechanism which not only scales linearly with sequence length but also beats SOTA Roberta model on Long Document Tasks . Although the Global Attention of Longformer remains task specific , its a fair trade given the results and optimizations. LongFormer attention Pattern gives a solid starting point to be used with other models as well like XLNet, MPnet ,etc.\nIf you have enjoyed the blog, I will recommend reading the original paper.\n",
   "wordCount" : "1547",
   "inLanguage": "en",
-  "image":"https://tanulsingh.github.io/public/longformer.jpg","datePublished": "2022-02-12T00:00:00Z",
+  "image":"http://localhost:1313/public/longformer.jpg","datePublished": "2022-02-12T00:00:00Z",
   "dateModified": "2022-02-12T00:00:00Z",
   "author":{
     "@type": "Person",
@@ -81,14 +81,14 @@
   },
   "mainEntityOfPage": {
     "@type": "WebPage",
-    "@id": "https://tanulsingh.github.io/public/posts/longformer/"
+    "@id": "http://localhost:1313/public/posts/longformer/"
   },
   "publisher": {
     "@type": "Organization",
     "name": "Mr. KnowNothing",
     "logo": {
       "@type": "ImageObject",
-      "url": "https://tanulsingh.github.io/public/favicon.ico"
+      "url": "http://localhost:1313/public/favicon.ico"
     }
   }
 }
@@ -135,8 +135,8 @@
 <header class="header">
     <nav class="nav">
         <div class="logo">
-            <a href="https://tanulsingh.github.io/public/" accesskey="h" title="Tanul Singh">
-                <img src="https://tanulsingh.github.io/public/402A2908.JPG" alt="" aria-label="logo"
+            <a href="http://localhost:1313/public/" accesskey="h" title="Tanul Singh">
+                <img src="http://localhost:1313/public/402A2908.JPG" alt="" aria-label="logo"
                     height="20"
                     width="20">Tanul Singh</a>
             <div class="logo-switches">
@@ -164,27 +164,27 @@
         </div>
         <ul id="menu">
             <li>
-                <a href="https://tanulsingh.github.io/public/cv.pdf" title="CV">
+                <a href="http://localhost:1313/public/cv.pdf" title="CV">
                     <span>CV</span>
                 </a>
             </li>
             <li>
-                <a href="https://tanulsingh.github.io/public/posts/" title="Blog">
+                <a href="http://localhost:1313/public/posts/" title="Blog">
                     <span>Blog</span>
                 </a>
             </li>
             <li>
-                <a href="https://tanulsingh.github.io/public/projects/" title="Personal Projects">
+                <a href="http://localhost:1313/public/projects/" title="Personal Projects">
                     <span>Personal Projects</span>
                 </a>
             </li>
             <li>
-                <a href="https://tanulsingh.github.io/public/about/" title="About">
+                <a href="http://localhost:1313/public/about/" title="About">
                     <span>About</span>
                 </a>
             </li>
             <li>
-                <a href="https://tanulsingh.github.io/public/archive/" title="Archive">
+                <a href="http://localhost:1313/public/archive/" title="Archive">
                     <span>Archive</span>
                 </a>
             </li>
@@ -285,16 +285,16 @@ same amount of computation as RoBERTa.</p>
 
   <footer class="post-footer">
     <ul class="post-tags">
-      <li><a href="https://tanulsingh.github.io/public/tags/transformer/">Transformer</a></li>
-      <li><a href="https://tanulsingh.github.io/public/tags/long-sequences/">Long Sequences</a></li>
-      <li><a href="https://tanulsingh.github.io/public/tags/llm/">LLM</a></li>
+      <li><a href="http://localhost:1313/public/tags/transformer/">Transformer</a></li>
+      <li><a href="http://localhost:1313/public/tags/long-sequences/">Long Sequences</a></li>
+      <li><a href="http://localhost:1313/public/tags/llm/">LLM</a></li>
     </ul>
   </footer>
 </article>
     </main>
     
 <footer class="footer">
-    <span>&copy; 2024 <a href="https://tanulsingh.github.io/public/">Mr. KnowNothing</a></span> ·     
+    <span>&copy; 2024 <a href="http://localhost:1313/public/">Mr. KnowNothing</a></span> ·     
     <span>
     Powered by 
         <a href="https://gohugo.io/" rel="noopener noreferrer" target="_blank">Hugo</a> &
