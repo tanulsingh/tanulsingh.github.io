@@ -32,7 +32,14 @@ As a Lead Machine Learning Engineer at LevelAI, I spearhead innovative projects 
 <b>Patents and Innovations</b><br>
 Patent Granted in US Patent Agency for Development of a dynamic intent detection system detecting intents from customer-agent interaction in real time . This system is adaptable to real-time client modifications, surpassing traditional static models.
 <br><br>
-In my free time I love to participate in Kaggle competition to further enhance my skills in AI . Some profound achievements include<br>
+<b>Publications</b><br>
+<a href="https://www.researchgate.net/publication/359051366_GWNET_Detecting_Gravitational_Waves_using_Hierarchical_and_Residual_Learning_based_1D_CNNs">GWNET: Detecting Gravitational Waves using Hierarchical and Residual Learning based 1D CNNs</a><br>
+- This was part of our gold Winning solution for Kaggle Comeptition on Detection of Gravitational Waves <br>
+- We built an end-to-end 1D Convolutional Neural Network architecture that can be applied directly on raw
+time-series data collected by these interferometers to detect gravitational waves. The key model aspects are ability to capture hierarchical features using parallel Convolutional blocks and residual learning via custom Residual layers.
+<br><br>
+In my free time I love to participate in Kaggle competition to further enhance my skills in AI . Some profound achievements include
+<br>
  - <a href="https://www.linkedin.com/feed/update/urn:li:activity:6909399161356320768/">Winner of Kaggle Days Championship Regionals, representing India in the finals in Barcelona, Spain.</a><br>
  - <a href="https://www.kaggle.com/tanulsingh077"> Ranked as a Kaggle Competitions Master, with 3 gold and 10 silver medals, and participation in over 30 competitions.</a><br>
  - <a href="https://www.kaggle.com/tanulsingh077"> Ranked as a Kaggle Notebooks Grandmaster, with 16 gold medals, showcasing solutions to various problems across different verticals.</a><br>
