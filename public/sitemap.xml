@@ -2,43 +2,43 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
   xmlns:xhtml="http://www.w3.org/1999/xhtml">
   <url>
-    <loc>http://localhost:1313/public/location/</loc>
+    <loc>https://tanulsingh.github.io/public/location/</loc>
     <lastmod>2024-05-08T00:00:00+00:00</lastmod>
   </url><url>
-    <loc>http://localhost:1313/public/</loc>
+    <loc>https://tanulsingh.github.io/public/</loc>
     <lastmod>2024-05-08T00:00:00+00:00</lastmod>
   </url><url>
-    <loc>http://localhost:1313/public/posts/</loc>
+    <loc>https://tanulsingh.github.io/public/posts/</loc>
     <lastmod>2022-02-12T00:00:00+00:00</lastmod>
   </url><url>
-    <loc>http://localhost:1313/public/posts/deberta/</loc>
+    <loc>https://tanulsingh.github.io/public/posts/deberta/</loc>
     <lastmod>2022-02-12T00:00:00+00:00</lastmod>
   </url><url>
-    <loc>http://localhost:1313/public/tags/llm/</loc>
+    <loc>https://tanulsingh.github.io/public/tags/llm/</loc>
     <lastmod>2022-02-12T00:00:00+00:00</lastmod>
   </url><url>
-    <loc>http://localhost:1313/public/tags/long-sequences/</loc>
+    <loc>https://tanulsingh.github.io/public/tags/long-sequences/</loc>
     <lastmod>2022-02-12T00:00:00+00:00</lastmod>
   </url><url>
-    <loc>http://localhost:1313/public/posts/longformer/</loc>
+    <loc>https://tanulsingh.github.io/public/posts/longformer/</loc>
     <lastmod>2022-02-12T00:00:00+00:00</lastmod>
   </url><url>
-    <loc>http://localhost:1313/public/tags/microsoft-research/</loc>
+    <loc>https://tanulsingh.github.io/public/tags/microsoft-research/</loc>
     <lastmod>2022-02-12T00:00:00+00:00</lastmod>
   </url><url>
-    <loc>http://localhost:1313/public/tags/paper-explanation/</loc>
+    <loc>https://tanulsingh.github.io/public/tags/paper-explanation/</loc>
     <lastmod>2022-02-12T00:00:00+00:00</lastmod>
   </url><url>
-    <loc>http://localhost:1313/public/tags/</loc>
+    <loc>https://tanulsingh.github.io/public/tags/</loc>
     <lastmod>2022-02-12T00:00:00+00:00</lastmod>
   </url><url>
-    <loc>http://localhost:1313/public/tags/transformer/</loc>
+    <loc>https://tanulsingh.github.io/public/tags/transformer/</loc>
     <lastmod>2022-02-12T00:00:00+00:00</lastmod>
   </url><url>
-    <loc>http://localhost:1313/public/about/</loc>
+    <loc>https://tanulsingh.github.io/public/about/</loc>
   </url><url>
-    <loc>http://localhost:1313/public/archive/</loc>
+    <loc>https://tanulsingh.github.io/public/archive/</loc>
   </url><url>
-    <loc>http://localhost:1313/public/projects/</loc>
+    <loc>https://tanulsingh.github.io/public/projects/</loc>
   </url>
 </urlset>

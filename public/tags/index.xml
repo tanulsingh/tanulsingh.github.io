@@ -2,45 +2,45 @@
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/">
   <channel>
     <title>Tags on Mr. KnowNothing</title>
-    <link>http://localhost:1313/public/tags/</link>
+    <link>https://tanulsingh.github.io/public/tags/</link>
     <description>Recent content in Tags on Mr. KnowNothing</description>
     <generator>Hugo -- 0.133.0</generator>
     <language>en</language>
     <lastBuildDate>Sat, 12 Feb 2022 00:00:00 +0000</lastBuildDate>
-    <atom:link href="http://localhost:1313/public/tags/index.xml" rel="self" type="application/rss+xml" />
+    <atom:link href="https://tanulsingh.github.io/public/tags/index.xml" rel="self" type="application/rss+xml" />
     <item>
       <title>LLM</title>
-      <link>http://localhost:1313/public/tags/llm/</link>
+      <link>https://tanulsingh.github.io/public/tags/llm/</link>
       <pubDate>Sat, 12 Feb 2022 00:00:00 +0000</pubDate>
-      <guid>http://localhost:1313/public/tags/llm/</guid>
+      <guid>https://tanulsingh.github.io/public/tags/llm/</guid>
       <description></description>
     </item>
     <item>
       <title>Long Sequences</title>
-      <link>http://localhost:1313/public/tags/long-sequences/</link>
+      <link>https://tanulsingh.github.io/public/tags/long-sequences/</link>
       <pubDate>Sat, 12 Feb 2022 00:00:00 +0000</pubDate>
-      <guid>http://localhost:1313/public/tags/long-sequences/</guid>
+      <guid>https://tanulsingh.github.io/public/tags/long-sequences/</guid>
       <description></description>
     </item>
     <item>
       <title>Microsoft Research</title>
-      <link>http://localhost:1313/public/tags/microsoft-research/</link>
+      <link>https://tanulsingh.github.io/public/tags/microsoft-research/</link>
       <pubDate>Sat, 12 Feb 2022 00:00:00 +0000</pubDate>
-      <guid>http://localhost:1313/public/tags/microsoft-research/</guid>
+      <guid>https://tanulsingh.github.io/public/tags/microsoft-research/</guid>
       <description></description>
     </item>
     <item>
       <title>Paper Explanation</title>
-      <link>http://localhost:1313/public/tags/paper-explanation/</link>
+      <link>https://tanulsingh.github.io/public/tags/paper-explanation/</link>
       <pubDate>Sat, 12 Feb 2022 00:00:00 +0000</pubDate>
-      <guid>http://localhost:1313/public/tags/paper-explanation/</guid>
+      <guid>https://tanulsingh.github.io/public/tags/paper-explanation/</guid>
       <description></description>
     </item>
     <item>
       <title>Transformer</title>
-      <link>http://localhost:1313/public/tags/transformer/</link>
+      <link>https://tanulsingh.github.io/public/tags/transformer/</link>
       <pubDate>Sat, 12 Feb 2022 00:00:00 +0000</pubDate>
-      <guid>http://localhost:1313/public/tags/transformer/</guid>
+      <guid>https://tanulsingh.github.io/public/tags/transformer/</guid>
       <description></description>
     </item>
   </channel>
