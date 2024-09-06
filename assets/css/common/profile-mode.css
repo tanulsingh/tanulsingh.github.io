@@ -3,6 +3,7 @@
     display: flex;
     justify-content: left;
 }
+
 .main .profile {
     align-items: center;
     min-height: calc(100vh - var(--footer-height) - (var(--gap) * 2));
@@ -11,6 +12,7 @@
 }
 
 .profile .profile_inner {
+    font-family: "monospace";
     display: flex;
     flex-direction: column;
     align-items: flex-start;
@@ -38,6 +40,7 @@
 }
 
 .button-inner {
+    font-family: "monospace";
     padding: 0 8px;
 }
 
