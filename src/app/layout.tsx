@@ -68,9 +68,9 @@ export default function RootLayout({
       <body className="min-h-screen font-sans antialiased">
         <ThemeProvider attribute="class" defaultTheme="dark" enableSystem>
           <ConstellationCanvas />
-          <div className="relative z-10">
+          <div className="relative z-10 flex min-h-screen flex-col">
             <Navbar />
-            <main>{children}</main>
+            <main className="flex-1">{children}</main>
             <Footer />
           </div>
         </ThemeProvider>
