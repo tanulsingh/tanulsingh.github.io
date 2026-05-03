@@ -37,6 +37,7 @@ function getPostsFromDir(dir: string): Post[] {
       },
       content,
       readingTime: stats.text,
+      basePath: `/${dir}`,
     });
   }
 

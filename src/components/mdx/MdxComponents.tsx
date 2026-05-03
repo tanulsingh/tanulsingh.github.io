@@ -1,8 +1,14 @@
 import type { MDXComponents } from "mdx/types";
 import { Callout } from "./Callout";
+import { BPEVisualizer } from "./BPEVisualizer";
+import { UnigramVisualizer } from "./UnigramVisualizer";
+import { SentencePieceDemo } from "./SentencePieceDemo";
 
 export const mdxComponents: MDXComponents = {
   Callout,
+  BPEVisualizer,
+  UnigramVisualizer,
+  SentencePieceDemo,
 
   img: (props) => (
     <figure className="my-8">

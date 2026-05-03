@@ -2,10 +2,12 @@ import { HeroSection } from "@/components/home/HeroSection";
 import { HighlightsBar } from "@/components/home/HighlightsBar";
 import { LearningCurve } from "@/components/home/LearningCurve";
 import { FeaturedPosts } from "@/components/home/FeaturedPosts";
-import { getAllPapers } from "@/lib/content";
+import { getAllPosts, getAllPapers } from "@/lib/content";
 
 export default function Home() {
-  const posts = getAllPapers();
+  const posts = [...getAllPosts(), ...getAllPapers()]
+    .sort((a, b) => new Date(b.frontmatter.date).getTime() - new Date(a.frontmatter.date).getTime())
+    .slice(0, 4);
 
   return (
     <>

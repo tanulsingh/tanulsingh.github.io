@@ -1,0 +1,520 @@
+---
+title: "Tokenization — The First Gradient Descent Step"
+date: "2026-05-01"
+tags: ["Transformers", "NLP", "Tokenization", "The Gradient Descent through Transformers"]
+author: "Tanul Singh"
+description: "From character-level to BPE to SentencePiece — how the way we split text into pieces quietly became one of the most important decisions in building LLMs."
+summary: "Tokenization is the invisible foundation of every LLM. This post traces how it evolved from simple word splitting to BPE, WordPiece, Unigram, and SentencePiece — and why the choice of tokenizer shapes everything downstream."
+featured: true
+---
+
+*This is Part 1 of **The Gradient Descent through Transformers** — a series where I walk through every component of the modern transformer stack, how it evolved from 2017 to 2026, and why each piece matters.*
+
+---
+
+Before attention, before embeddings, before any gradient is computed — there's tokenization. It's the first thing that happens to your input and the last thing that happens to your output. Every LLM you've ever used — GPT-4, Claude, Llama, Gemini — starts by splitting your text into tokens. And the way it splits that text quietly shapes everything that follows.
+
+Most people skip this part. That's a mistake.
+
+## Why Tokenization Matters More Than You Think
+
+A language model doesn't see text. It sees sequences of integers. The tokenizer is the bridge — it converts `"The cat sat on the mat"` into something like `[464, 3797, 3332, 319, 262, 2603]`. The model processes these integers, generates new ones, and the tokenizer converts them back to text.
+
+This sounds trivial, but the choice of tokenization affects:
+
+- **Vocabulary size** — which determines embedding table size and softmax computation
+- **Sequence length** — the same sentence can be 5 tokens or 50 tokens depending on the tokenizer
+- **Multilingual performance** — a tokenizer trained on English will fragment Hindi or Japanese into many more tokens, making the model slower and worse at those languages
+- **The model's notion of "words"** — `"unhappiness"` might be one token, two (`"un"` + `"happiness"`), or three (`"un"` + `"happi"` + `"ness"`)
+- **Cost** — API pricing is per-token. Tokenization efficiency directly affects your bill
+
+## The Evolution: From Words to Subwords
+
+### The Naive Approach: Word-Level Tokenization
+
+The simplest idea: split on whitespace and punctuation. `"I love machine learning"` → `["I", "love", "machine", "learning"]`.
+
+Problems:
+- **Open vocabulary**: what happens when the model encounters `"transformerification"`? It's not in the vocabulary. You need an `[UNK]` (unknown) token, which throws away all information about the word.
+- **Vocabulary explosion**: English alone has hundreds of thousands of word forms. Add morphological variations (`run`, `runs`, `running`, `ran`), compound words, technical terms, and you need a vocabulary of 500K+. That's a 500K × d embedding matrix.
+- **No morphological sharing**: the model can't learn that `"run"` and `"running"` are related — they're completely separate entries.
+
+### The Other Extreme: Character-Level Tokenization
+
+Split every character: `"hello"` → `["h", "e", "l", "l", "o"]`.
+
+Advantages: tiny vocabulary (~256 for ASCII + Unicode basics), no `[UNK]` tokens ever, perfect morphological compositionality.
+
+Problems:
+- **Sequences become very long**: a 500-word paragraph becomes 2500+ characters. With attention's $O(n^2)$ complexity, this is brutal.
+- **The model has to learn spelling**: it must learn that `h-e-l-l-o` means "hello" from scratch. This pushes an enormous burden onto the model.
+
+### The Goldilocks Zone: Subword Tokenization
+
+The insight that changed everything: **don't split at word boundaries or character boundaries — split at a learned sweet spot in between.**
+
+Common words stay whole: `"the"`, `"is"`, `"and"` are single tokens. Rare words get decomposed into meaningful pieces: `"tokenization"` → `["token", "ization"]`. The model gets a manageable vocabulary (32K-100K) while handling any input — no `[UNK]` tokens needed.
+
+This is the approach every modern LLM uses. The question is: *how* do you learn these subword splits?
+
+## Byte-Pair Encoding (BPE)
+
+BPE is the most widely used tokenization algorithm in modern LLMs. GPT-2, GPT-3, GPT-4, Llama, and many others use BPE or variants of it.
+
+The original algorithm was proposed as a data compression technique by [Philip Gage in 1994](https://en.wikipedia.org/wiki/Byte_pair_encoding). [Sennrich et al. (2016)](https://arxiv.org/abs/1508.07909) adapted it for neural machine translation, and it became the standard for language model tokenization.
+
+### The Algorithm — In Detail
+
+Let's walk through exactly what happens, step by step.
+
+**Step 1: Start with individual characters.**
+
+Take your entire training corpus and split every word into its individual characters. Your initial vocabulary is just the set of unique characters in the corpus. For English text, this might be the 26 lowercase letters, 26 uppercase, digits, punctuation, and a special symbol for spaces.
+
+For example, given the text `"the cat sat"`, the initial tokens are:
+
+`t h e ▁ c a t ▁ s a t`
+
+Here `▁` represents the space character. This is important — **spaces are characters too**. They get included in the token sequence and participate in pair counting. This is how the tokenizer learns word boundaries: the space character merges with letters to form word-beginning tokens.
+
+**Step 2: Scan for adjacent pairs and count their frequencies.**
+
+Walk through the token sequence from left to right. At each position, look at the current token and the next token — that's a "pair." Keep a running count of how often each unique pair appears.
+
+For `t h e ▁ c a t ▁ s a t`:
+- Position 0: pair is `(t, h)` → count: 1
+- Position 1: pair is `(h, e)` → count: 1
+- Position 2: pair is `(e, ▁)` → count: 1
+- Position 3: pair is `(▁, c)` → count: 1
+- Position 4: pair is `(c, a)` → count: 1
+- Position 5: pair is `(a, t)` → count: 1
+- Position 6: pair is `(t, ▁)` → count: 1
+- Position 7: pair is `(▁, s)` → count: 1
+- Position 8: pair is `(s, a)` → count: 1
+- Position 9: pair is `(a, t)` → count: **2** (seen this pair before!)
+
+With a larger corpus, some pairs will appear thousands or millions of times. The pair `(t, h)` might appear in every occurrence of "the", "that", "this", "they", etc.
+
+**Step 3: Merge the most frequent pair.**
+
+Find the pair with the highest count. Replace every occurrence of that pair in the token sequence with the merged result. Add the new merged token to the vocabulary.
+
+If `(a, t)` has the highest count, we merge it: everywhere we see `a` followed by `t`, we replace the two tokens with a single `at` token.
+
+Before: `t h e ▁ c a t ▁ s a t`
+After:  `t h e ▁ c at ▁ s at`
+
+Our vocabulary grows: `{t, h, e, ▁, c, a, s, at}`
+
+**Step 4: Repeat from Step 2.**
+
+Now scan the updated sequence for pairs again. The counts have changed because `at` is now a single token. Maybe `(t, h)` is now the most frequent. Merge it to get `th`. Then `(th, e)` might be next, giving us `the`. And so on.
+
+Each iteration:
+- Reduces the total number of tokens in the sequence
+- Adds one new entry to the vocabulary
+- Builds increasingly longer subword units
+
+You keep going until the vocabulary reaches your target size (typically 32K–100K tokens).
+
+### Try It Yourself
+
+Use the interactive visualizer below. Click **"next iteration"** to watch the full process: first it scans all adjacent pairs (highlighting each pair as it counts), shows you the frequency table, then merges the top pair. Watch how the token count decreases and the vocabulary grows with each step.
+
+<BPEVisualizer />
+
+### Why BPE Works
+
+- **Frequency-driven**: common words become single tokens, rare words decompose into frequent subparts
+- **No linguistic knowledge required**: it learns purely from co-occurrence statistics
+- **Deterministic**: given the same corpus and vocabulary size, you always get the same tokenizer
+- **Handles any input**: even unseen words decompose into known subword units
+
+### BPE in Practice: GPT's Tokenizer
+
+OpenAI's GPT-2 used BPE with a vocabulary of 50,257 tokens. GPT-4's tokenizer (cl100k_base) expanded to ~100K tokens. The larger vocabulary means more words become single tokens → shorter sequences → faster inference — at the cost of a larger embedding matrix.
+
+But there's a critical detail about how modern BPE actually works that's worth understanding.
+
+#### The Character vs Byte Problem
+
+Classic BPE (as described above) starts with characters. But "characters" in Unicode can mean hundreds of thousands of code points — Chinese characters, Arabic script, emoji, mathematical symbols. If your initial vocabulary needs to cover all of Unicode, you start with a massive base vocabulary before any merges happen.
+
+**Byte-Level BPE** solves this elegantly. To understand it, we need a quick detour into how computers actually store text.
+
+#### How Computers Store Text
+
+A computer doesn't understand letters. It stores everything as numbers. The system that maps characters to numbers is called an **encoding**, and the most common one today is **UTF-8**.
+
+In UTF-8, each character gets encoded as one or more **bytes** (a byte is a number from 0 to 255). The key: **simple English characters use 1 byte each, but characters from other scripts use 2-4 bytes.**
+
+Think of it like Morse code. In Morse, the letter `E` is just one dot (`.`), but the letter `Q` needs four symbols (`--.-`). Similarly in UTF-8:
+
+| Character | Language | Bytes needed | Byte values |
+|---|---|---|---|
+| `h` | English | 1 byte | `[104]` |
+| `e` | English | 1 byte | `[101]` |
+| `न` | Hindi | 3 bytes | `[224, 164, 168]` |
+| `猫` | Chinese | 3 bytes | `[231, 140, 171]` |
+| `🤖` | Emoji | 4 bytes | `[240, 159, 164, 150]` |
+
+So the English word `"hello"` becomes 5 bytes (one per letter): `[104, 101, 108, 108, 111]`
+
+But the Hindi word `"नमस्ते"` becomes **18 bytes** — because each Devanagari character needs 3 bytes.
+
+#### From Characters to Bytes
+
+Now here's the insight behind Byte-Level BPE: **instead of starting with characters as your base vocabulary (potentially hundreds of thousands of them), start with bytes (always exactly 256).**
+
+Every possible text in every language — English, Hindi, Chinese, Arabic, code, emoji, even raw binary data — is ultimately just a sequence of numbers from 0 to 255. So your initial vocabulary is always exactly 256 entries, regardless of how many languages you need to support.
+
+The BPE algorithm then runs on these byte sequences, merging frequent byte pairs just like before. In an English-heavy training corpus:
+- The byte pair `[104, 101]` (which represents `he`) might appear millions of times → gets merged early
+- Common English words gradually become single tokens: `the`, `and`, `is`
+- Hindi byte sequences like `[224, 164]` might get merged too, but only if Hindi text appears frequently enough in the corpus
+
+#### The Multilingual Tradeoff
+
+This is where byte-level BPE reveals its biggest limitation. Let's compare tokenizing the same meaning in two languages:
+
+**English:** `"hello"` → 5 bytes → after BPE merges, likely **1 token** (common English word)
+
+**Hindi:** `"नमस्ते"` → 18 bytes → after BPE merges, might be **4-6 tokens** (less frequent in typical training data)
+
+The Hindi text starts with 3.6x more raw bytes AND gets fewer merges (because Hindi text is less common in most training corpora). The result: **the same meaning costs 4-6x more tokens in Hindi than in English.** This is the root cause of multilingual inequity in LLMs — it's not the model's fault, it's the tokenizer's.
+
+#### Why This Matters
+
+1. **No `[UNK]` tokens, ever.** Any input can be represented. This is critical for production systems that encounter arbitrary user input — code, URLs, non-Latin scripts, emoji.
+
+2. **One tokenizer for all languages.** You don't need separate tokenizers for English, Chinese, and Arabic. The byte-level approach handles everything with the same 256 base tokens.
+
+3. **The tradeoff is compression efficiency.** A Chinese character that's a single Unicode code point becomes 3 bytes in UTF-8. If those byte sequences aren't frequent enough to be merged, the tokenizer fragments Chinese text into many more tokens than English — a major source of multilingual inequity.
+
+#### Real Tokenizer Implementations
+
+You can see Byte-Level BPE in action with these libraries:
+
+- **[tiktoken](https://github.com/openai/tiktoken)** — OpenAI's tokenizer library. Used for GPT-3.5/4. Written in Rust for speed. Try `tiktoken.encoding_for_model("gpt-4")` to get the cl100k tokenizer.
+- **[HuggingFace Tokenizers](https://github.com/huggingface/tokenizers)** — Supports BPE, WordPiece, and Unigram. Also Rust-backed. Used by most open-source models.
+- **[SentencePiece](https://github.com/google/sentencepiece)** — Google's C++ implementation. Used by T5, Llama, and many others.
+
+## WordPiece
+
+WordPiece was developed by [Schuster & Nakajima (2012)](https://static.googleusercontent.com/media/research.google.com/en//pubs/archive/37842.pdf) and later refined for [Google's Neural Machine Translation system (Wu et al., 2016)](https://arxiv.org/abs/1609.08144). It powers BERT, DistilBERT, ELECTRA, and other encoder models from Google.
+
+### How It Differs from BPE
+
+The core difference is the **merge criterion**. BPE merges the most **frequent** pair. WordPiece merges the pair that **maximizes the likelihood of the training data**.
+
+Concretely, for every candidate pair $(a, b)$, WordPiece computes:
+
+$$\text{score}(a, b) = \frac{P(ab)}{P(a) \cdot P(b)}$$
+
+This is a pointwise mutual information (PMI) score. It measures: "does this pair co-occur more than we'd expect if $a$ and $b$ were independent?"
+
+#### Why Does This Matter?
+
+Consider a corpus where `"t"` appears 10,000 times and `"h"` appears 8,000 times. The pair `(t, h)` appears 3,000 times. BPE would likely rank this pair highly because the raw count is high.
+
+But WordPiece asks: given that `"t"` and `"h"` are both extremely common, is 3,000 co-occurrences actually surprising? The expected count if they were independent would be $\frac{10000 \times 8000}{N}$ where $N$ is the total. If 3,000 is *less* than expected, WordPiece won't prioritize this merge.
+
+Meanwhile, a rarer pair like `(q, u)` — where `"q"` appears only 200 times but `"qu"` appears 195 times — would get a very high PMI score because almost every `"q"` is followed by `"u"`. WordPiece would merge `(q, u)` first.
+
+**In summary:** BPE is greedy about frequency. WordPiece is smart about statistical association.
+
+### The `##` Convention
+
+The most visible difference for users: WordPiece marks **continuation subwords** with a `##` prefix.
+
+```
+"tokenization" → ["token", "##ization"]
+"unhappiness"  → ["un", "##happiness"]  
+"playing"      → ["play", "##ing"]
+```
+
+The `##` signals "I'm attached to the previous token — not a standalone word." This is important for tasks like Named Entity Recognition where you need to know which subwords form a single word.
+
+BPE handles this differently — it uses a leading space character (`Ġ` in GPT-2's vocabulary) to mark word beginnings, so `"the cat"` becomes `["the", "Ġcat"]`. The space is attached to the *following* word rather than marking continuation of the *previous* word.
+
+### WordPiece Encoding at Inference
+
+At inference time, WordPiece uses a **greedy longest-match-first** algorithm:
+
+1. Take the input word `"unhappiness"`
+2. Check: is `"unhappiness"` in the vocabulary? No.
+3. Try `"unhappines"`, `"unhappine"`, ..., until you find the longest prefix that IS in the vocabulary: `"un"`
+4. Output `"un"`, then repeat with the remainder `"happiness"`
+5. `"happiness"` is in the vocabulary → output `"##happiness"`
+
+Result: `["un", "##happiness"]`
+
+This is different from BPE's approach (which replays the merge rules in order). WordPiece's greedy matching is simpler but can sometimes give different segmentations than the training algorithm would produce.
+
+## Unigram Language Model
+
+The Unigram model, introduced by [Kudo (2018)](https://arxiv.org/abs/1804.10959), takes a fundamentally different approach from BPE and WordPiece.
+
+### Top-Down vs Bottom-Up
+
+BPE and WordPiece are **bottom-up**: start with the smallest units (characters or bytes), iteratively merge into larger pieces.
+
+Unigram is **top-down**: start with a very large vocabulary, then iteratively **remove** pieces that are least useful.
+
+Think of it as sculpture vs construction. BPE builds up tokens brick by brick. Unigram starts with a massive block and chips away everything that doesn't belong.
+
+### The Algorithm — Step by Step
+
+**Step 1: Initialize with a large seed vocabulary.**
+
+Take every substring of length 1 through some maximum length (say 5-10) that appears in the training corpus. This gives you a huge initial vocabulary — often 500K-1M tokens.
+
+For example, from just the word `"cat"`, you'd include: `c`, `a`, `t`, `ca`, `at`, `cat`. Now do this for *every* word in the corpus. The result is a massive vocabulary with lots of redundancy — the word `"cat"` can be represented as `["cat"]` or `["ca", "t"]` or `["c", "at"]` or `["c", "a", "t"]`.
+
+**Step 2: Assign probabilities.**
+
+Each token in the vocabulary gets a probability. But here's a chicken-and-egg problem: the best probabilities depend on knowing how words should be segmented, and the best segmentations depend on knowing the probabilities.
+
+Let's make this concrete. Say your vocabulary has `"cat"`, `"ca"`, `"at"`, `"c"`, `"a"`, `"t"`. You need to segment the word `"cat"`. Should it be:
+
+- `["cat"]` → likelihood = $P(\text{cat})$
+- `["ca", "t"]` → likelihood = $P(\text{ca}) \times P(\text{t})$
+- `["c", "at"]` → likelihood = $P(\text{c}) \times P(\text{at})$
+- `["c", "a", "t"]` → likelihood = $P(\text{c}) \times P(\text{a}) \times P(\text{t})$
+
+You'd pick the segmentation with the highest likelihood. But to compute likelihood, you need probabilities. And probabilities come from counting how often each token appears across *all* segmentations in the corpus. If `"cat"` gets segmented as one piece everywhere, $P(\text{cat})$ goes up. If it's split as `["c", "at"]` everywhere, $P(\text{c})$ and $P(\text{at})$ go up instead. The counts depend on the splits, and the splits depend on the counts.
+
+**The solution:** start with a rough guess (e.g., probabilities based on raw substring frequency), segment everything using those rough probabilities, recount token usage, update probabilities, segment again with the improved probabilities, recount, and repeat. Each round gets better until the probabilities stabilize. (This iterative technique is called the [EM algorithm](https://en.wikipedia.org/wiki/Expectation%E2%80%93maximization_algorithm).)
+
+For a given segmentation $S = (x_1, x_2, ..., x_n)$, the overall likelihood is the product of individual token probabilities:
+
+$$P(S) = \prod_{i=1}^{n} P(x_i)$$
+
+The "unigram" name comes from this — each token's probability is independent (like a unigram language model). The algorithm picks the segmentation that maximizes this product.
+
+**Step 3: Ask "what if I removed this token?"**
+
+This is the key step. For every token in the vocabulary, simulate removing it and compute how much the overall corpus likelihood would drop. Some tokens are critical — removing them would force many words into worse segmentations. Others are redundant — their subparts can cover the same text with barely any loss.
+
+For example, if your vocabulary contains `"cat"`, `"ca"`, `"at"`, `"c"`, `"a"`, `"t"`:
+- Removing `"cat"` barely hurts — the word can still be segmented as `["ca", "t"]` or `["c", "at"]`
+- Removing `"c"` would be catastrophic — it's a single character fallback that can't be replaced
+
+**Step 4: Prune the bottom 10-20%.**
+
+Remove the tokens whose removal causes the least damage. But **never remove single-character tokens** — they're the safety net that guarantees any word can always be segmented (worst case, character by character).
+
+**Step 5: Repeat from Step 2** until the vocabulary shrinks to your target size.
+
+### Unigram in Action: A Step-by-Step Walkthrough
+
+Walk through the full Unigram algorithm below — from seed vocabulary to final segmentation. Each step shows exactly how probabilities are computed, why certain segmentations win, and what happens when tokens get pruned.
+
+<UnigramVisualizer />
+
+### Why It Matters: Probabilistic Segmentation
+
+The key advantage of Unigram: it naturally produces **multiple valid segmentations** for a given input, each with a probability.
+
+For `"tokenization"`, possible segmentations might be:
+
+- `["token", "ization"]` — probability 0.7
+- `["to", "ken", "ization"]` — probability 0.2
+- `["token", "iz", "ation"]` — probability 0.1
+
+During training, you can **sample** different segmentations (a technique called **subword regularization**). The model sees the same word segmented differently across epochs. This acts as powerful data augmentation — the model can't memorize specific subword patterns and must learn more robust representations.
+
+BPE always produces the same segmentation for the same input — it's deterministic. If BPE tokenizes `"tokenization"` as `["token", "ization"]`, it will *always* do so. Unigram's probabilistic nature is its unique strength, particularly for low-resource languages where training data is limited and every bit of regularization helps.
+
+## SentencePiece: Why Do We Need It?
+
+[SentencePiece](https://arxiv.org/abs/1808.06226) (Kudo & Richardson, 2018) isn't a tokenization algorithm — it's a **framework** that wraps BPE and Unigram into a language-agnostic tokenizer. But to understand why it exists, you need to understand a shortcut that earlier tokenizers took.
+
+### The Two-Stage Pipeline Problem
+
+Tokenization actually has **two stages**, and most people only think about the second one:
+
+1. **Pre-tokenization**: split raw text into "words" (rough chunks)
+2. **Subword tokenization**: run BPE/WordPiece/Unigram on each chunk
+
+Stage 2 is what we've been discussing — BPE merges, WordPiece PMI scores, Unigram pruning. But Stage 1 happens first, and it's where the trouble is.
+
+When GPT-2 runs BPE, it doesn't feed the raw text `"the cat sat"` directly into the algorithm. It first splits on spaces and punctuation using a regex pattern, producing `["the", " cat", " sat"]`. Then it runs BPE on each piece **separately**.
+
+This pre-tokenization is a **shortcut for efficiency**. If you run BPE on one giant character stream, it counts pairs across word boundaries: the `e` at the end of `"the"` pairs with the space, which pairs with the `c` of `"cat"`. These cross-word pairs are noise — `e▁` and `▁c` are rarely useful subwords. Pre-tokenization avoids this by keeping each word as an isolated island.
+
+But this shortcut has a cost: **you need language-specific rules to know where the words are.**
+
+For English: split on spaces. Easy.
+
+For Japanese `"猫が座った"`: there are no spaces. You need to run a word segmenter like MeCab first → `["猫", "が", "座っ", "た"]` → then BPE.
+
+For Chinese: use Jieba segmenter → then BPE.
+
+For Thai: use PyThaiNLP → then BPE.
+
+Now you need different Stage 1 code for every language. Ship a model to production? You also ship MeCab for Japanese users, Jieba for Chinese users, PyThaiNLP for Thai users. A tokenizer that was supposed to be a simple text-to-integers function now depends on a dozen language-specific tools.
+
+### Why This Isn't Just an Engineering Inconvenience
+
+The pre-tokenization shortcut doesn't just make the code messy — it **structurally disadvantages non-English languages.** Let's trace through a concrete example.
+
+Take the Japanese sentence `"私は猫が好きです"` (I like cats) and the English equivalent `"I like cats"`.
+
+**With pre-tokenized BPE:**
+
+English gets split into three small chunks: `["I", " like", " cats"]`. BPE runs on each chunk separately — short, clean, efficient. The merge table (trained on lots of English) has great merges: `l+i→li`, `li+ke→like`. Result: **3 tokens.**
+
+Japanese has no spaces. The entire sentence is one "chunk": `["私は猫が好きです"]`. BPE has to process this 8-character string as a single piece. And if the merge table was trained mostly on English, it never learned that `好+き` should be merged, or that `です` is a common suffix. So the Japanese text stays fragmented — possibly all the way down to individual UTF-8 bytes.
+
+Each Japanese character is 3 bytes in UTF-8. So `"私は猫が好きです"` = 24 bytes = potentially **24 tokens** for a sentence that means the same as the 3-token English version.
+
+This isn't a theoretical problem. It means:
+- Japanese users hit context window limits **8x faster**
+- Inference is **8x slower** for Japanese text
+- API costs are **8x higher** per Japanese sentence
+- The model has less "room to think" about Japanese content
+
+**With SentencePiece:**
+
+No pre-tokenization. Japanese enters as a flat character stream, same as English. If the training corpus has enough Japanese text, the algorithm sees `好き` appearing together thousands of times and merges it. It sees `です` as a common ending and merges it.
+
+Result: `["▁私", "は", "猫", "が", "好き", "です"]` — **6 tokens.** Not as efficient as the 3-token English, but 4x better than the 24-token pre-tokenized result.
+
+### SentencePiece Fixes the Structure, Not the Data
+
+One important nuance: SentencePiece removes the **structural bias** (no more assumption that words are separated by spaces), but it doesn't magically make every language equally efficient. If you train SentencePiece mostly on English data, Japanese will still get fewer dedicated merges and fragment into more tokens.
+
+This is why the trend toward massive vocabularies matters. Llama 3 (128K vocab) and Gemma (256K vocab) are trained on multilingual data with large vocabularies — giving every language room to have its own dedicated tokens. A vocabulary of 32K trained on English-heavy data might allocate 25K tokens to English subwords and only 7K to everything else. A vocabulary of 256K trained on balanced multilingual data can give 30K+ tokens to each of the top 8 languages.
+
+SentencePiece solved the architecture problem. Bigger, multilingual vocabularies are solving the data problem.
+
+### SentencePiece's Insight: Skip Stage 1 Entirely
+
+SentencePiece asked: **what if we don't pre-tokenize at all?**
+
+Feed the entire raw text — spaces and all — directly into BPE or Unigram as one flat character sequence. Spaces become the `▁` character and participate in pair counting just like any other character.
+
+`"the cat sat"` → `▁ t h e ▁ c a t ▁ s a t`
+
+Yes, this means BPE will count cross-word pairs like `(e, ▁)` and `(▁, c)`. But here's the key insight: **with enough data, the useful within-word pairs will have much higher counts and get merged first anyway.** The pair `(a, t)` from "cat", "sat", "mat" appears thousands of times. The pair `(e, ▁)` is scattered and less frequent. The noise washes out.
+
+And something interesting happens: `▁` merges WITH letters to form word-start tokens. `▁` + `t` → `▁t`, then `▁t` + `h` → `▁th`, then `▁th` + `e` → `▁the`. **The algorithm learns word boundaries from data** — no rules needed.
+
+### See the Difference
+
+Toggle between the two approaches and step through each one. Notice how the traditional approach needs pre-tokenization (splitting on spaces) while SentencePiece works directly on the raw character stream — and both arrive at the same merges:
+
+<SentencePieceDemo />
+
+### How It Handles Different Languages
+
+Because there's no pre-tokenization, the same algorithm works for every language:
+
+For English `"The cat sat"`:
+```
+["▁The", "▁cat", "▁sat"]
+```
+
+For Japanese `"猫が座った"` (the cat sat):
+```
+["▁", "猫", "が", "座", "った"]
+```
+
+For German `"Donaudampfschifffahrt"` (Danube steamship navigation):
+```
+["▁Don", "au", "dampf", "schiff", "fahrt"]
+```
+
+No MeCab, no Jieba, no language-specific rules. The BPE/Unigram merges naturally learn the structure of each language from the training data.
+
+### SentencePiece = Algorithm + Framework
+
+When someone says they use "SentencePiece," they mean: "I use the SentencePiece framework with either BPE or Unigram as the algorithm inside." The framework handles:
+
+- Raw text input/output (no pre-tokenization needed)
+- The `▁` whitespace convention
+- **Lossless tokenization**: `detokenize(tokenize(text)) == text` always holds — you can perfectly reconstruct the original text including spaces
+- Training from raw text files
+- Model serialization (a single `.model` file you ship with your model)
+- Efficient encoding/decoding in C++
+
+The algorithm choice is a flag: `--model_type=bpe` or `--model_type=unigram`.
+
+## Who Uses What — And Why
+
+| Model | Tokenizer | Vocab Size | Why This Choice |
+|---|---|---|---|
+| GPT-2 (2019) | Byte-Level BPE | 50,257 | Pioneered byte-level BPE. 50K was considered large at the time. |
+| BERT (2018) | WordPiece | 30,522 | Google's in-house tokenizer. PMI-based merges suited the masked LM objective. |
+| T5 (2020) | SentencePiece (Unigram) | 32,000 | Google switched to SentencePiece for language-agnostic handling. Unigram chosen for its probabilistic segmentation. |
+| GPT-4 (2023) | Byte-Level BPE (cl100k) | ~100,000 | 2x larger vocab than GPT-2 — better compression, especially for non-English and code. |
+| Llama 2 (2023) | SentencePiece (BPE) | 32,000 | Meta chose SentencePiece for multilingual support. BPE over Unigram for deterministic behavior. |
+| Llama 3 (2024) | Tiktoken (BPE) | 128,000 | 4x larger vocab than Llama 2. Switched to tiktoken for faster encoding. Massive vocab improves multilingual and code performance. |
+| Mistral (2023) | SentencePiece (BPE) | 32,000 | Same framework as Llama 2. Focused on efficient architecture rather than tokenizer innovation. |
+| Gemma (2024) | SentencePiece (BPE) | 256,000 | Largest vocab in the table. Google betting on extreme vocabulary size for universal language coverage. |
+| DeepSeek v3 (2024) | BPE (custom) | 128,000 | Custom implementation optimized for Chinese + English + code. |
+| Qwen 2.5 (2024) | BPE (custom, tiktoken-based) | 152,064 | Large vocab designed for CJK languages, English, and code. |
+
+### The Trend: Bigger Vocabularies
+
+The clear trend from 2018 to 2024: vocabulary sizes are growing rapidly. BERT used 30K. Gemma uses 256K — an 8x increase.
+
+Why? Larger vocabularies produce shorter token sequences. Shorter sequences mean:
+- **Faster inference** — fewer autoregressive steps to generate the same text
+- **Longer effective context** — your 128K token window covers more text
+- **Better multilingual** — non-English languages get dedicated tokens instead of being fragmented into bytes
+- **Better code** — common code patterns (`def __init__`, `import torch`) become single tokens
+
+The cost: a larger embedding table (vocab_size × hidden_dim), which increases model size. But for modern LLMs with billions of parameters, the embedding table is a tiny fraction of total parameters.
+
+### The Convergence
+
+Despite different starting points, the industry is converging on **Byte-Level BPE with large vocabularies (100K+), optionally wrapped in SentencePiece for language-agnostic handling.** WordPiece is essentially BERT-only at this point. Unigram survives in T5 and a few others but isn't gaining adoption. The debate has shifted from *which algorithm* to *how big should the vocabulary be* and *what data mixture to train the tokenizer on*.
+
+## The Unsolved Problems
+
+Tokenization in 2026 is far better than 2017, but several problems remain:
+
+### Multilingual Inequity
+A tokenizer trained primarily on English will use 1 token for `"hello"` but might need 5+ tokens for the Hindi equivalent `"नमस्ते"`. This means:
+- Hindi text is 3-5x longer in tokens → slower inference, higher cost
+- The model's effective context window for Hindi is 3-5x smaller
+- API costs are 3-5x higher for Hindi users
+
+### Numbers and Arithmetic
+Most tokenizers handle numbers poorly. `"12345"` might become `["123", "45"]` or `["1", "234", "5"]` depending on the tokenizer. The model has to learn arithmetic on these arbitrary splits. This is one reason LLMs struggle with math.
+
+### The Tokenizer Is Frozen
+Once you've trained a tokenizer and a model on it, you can't change the tokenizer without retraining the entire model. If your tokenizer does poorly on code or a new language, you're stuck. Some recent work on tokenizer merging and vocabulary expansion tries to address this, but it's not solved.
+
+## What This Means for You
+
+If you're building on top of LLMs:
+- **Token count ≠ word count**. Know your tokenizer. Use `tiktoken` (for OpenAI models) or the model's tokenizer library to count tokens accurately.
+- **Multilingual?** Check how your tokenizer handles your target languages. The compression ratio (characters per token) varies wildly.
+- **Context window math**: your 128K context window is 128K *tokens*, not characters. For English that's roughly 100K words. For CJK languages, it might be 40K characters.
+
+If you're training your own models:
+- **Vocabulary size is a hyperparameter**. Larger vocabularies improve compression but increase memory. The sweet spot depends on your data mix and compute budget.
+- **Train the tokenizer on your data distribution**. A tokenizer trained on English Wikipedia will perform poorly on code or scientific text.
+- **Consider Unigram + subword regularization** if you want more robust models.
+
+---
+
+## References & Further Reading
+
+- **[A New Algorithm for Data Compression](https://www.derczynski.com/papers/archive/BPE_Gage.pdf)** (Gage, 1994) — The original BPE paper. A data compression algorithm that became the foundation of modern LLM tokenization.
+- **[Let's build the GPT Tokenizer](https://www.youtube.com/watch?v=zduSFxRajkE)** — Andrej Karpathy's excellent video building a BPE tokenizer from scratch. If you prefer learning by watching, start here.
+- **[Neural Machine Translation of Rare Words with Subword Units](https://arxiv.org/abs/1508.07909)** (Sennrich et al., 2016) — The paper that adapted BPE for NLP and made subword tokenization standard.
+- **[Google's Neural Machine Translation System](https://arxiv.org/abs/1609.08144)** (Wu et al., 2016) — Introduced WordPiece tokenization as part of Google's NMT system.
+- **[SentencePiece: A simple and language independent subword tokenizer](https://arxiv.org/abs/1808.06226)** (Kudo & Richardson, 2018) — The SentencePiece paper.
+- **[Subword Regularization: Improving Neural Network Translation Models with Multiple Subword Candidates](https://arxiv.org/abs/1804.10959)** (Kudo, 2018) — The Unigram language model paper.
+- **[tiktoken](https://github.com/openai/tiktoken)** — OpenAI's fast BPE tokenizer library. Great for counting tokens for GPT models.
+- **[HuggingFace Tokenizers](https://huggingface.co/docs/tokenizers)** — The go-to library for training and using tokenizers in Python.
+
+---
+
+*Next in the series: **Positional Encoding** — how transformers know that word order matters, from sinusoidal functions to RoPE.*
+
+*This post is part of [The Gradient Descent through Transformers](/blog) — a series dissecting every component of the modern transformer stack.*

@@ -61,6 +61,20 @@ html {
   scroll-behavior: smooth;
 }
 
+/* Dark glass overlay between canvas animation and content */
+.glass-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: rgba(15, 13, 11, 0.35);
+  backdrop-filter: blur(0.8px);
+  -webkit-backdrop-filter: blur(0.8px);
+}
+.light .glass-overlay {
+  background: rgba(250, 247, 244, 0.4);
+}
+
 body {
   background-color: var(--bg);
   color: var(--text);
@@ -156,7 +170,26 @@ code:not(pre code) {
   line-height: 1.85;
   letter-spacing: -0.01em;
 }
-.prose-paper :where(h1,h2,h3,h4,h5,h6) {
+.prose-paper :where(h2) {
   font-family: var(--font-serif);
+  font-size: 1.875rem;
+  font-weight: 700;
   letter-spacing: -0.02em;
+  margin-top: 2.5em;
+  margin-bottom: 0.8em;
+}
+.prose-paper :where(h3) {
+  font-family: var(--font-serif);
+  font-size: 1.35rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-top: 2em;
+  margin-bottom: 0.6em;
+}
+.prose-paper :where(h4) {
+  font-family: var(--font-serif);
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin-top: 1.5em;
+  margin-bottom: 0.5em;
 }
