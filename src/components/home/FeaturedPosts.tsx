@@ -22,11 +22,11 @@ export function FeaturedPosts({ posts }: FeaturedPostsProps) {
               className="text-3xl font-bold tracking-tight md:text-4xl"
               style={{ fontFamily: "var(--font-serif)" }}
             >
-              Paper Explanations
+              Paper Explanations &amp; Articles
             </h2>
           </div>
           <Link
-            href="/papers"
+            href="/blog"
             className="group hidden items-center gap-1 text-sm font-medium transition-colors hover:opacity-80 md:flex"
             style={{ color: "var(--text-secondary)" }}
           >
@@ -37,7 +37,7 @@ export function FeaturedPosts({ posts }: FeaturedPostsProps) {
 
         <div className="grid gap-6 md:grid-cols-2">
           {posts.map((post) => (
-            <Link key={post.slug} href={`/papers/${post.slug}`} className="group block">
+            <Link key={post.slug} href={`${post.basePath}/${post.slug}`} className="group block">
               <article className="notebook-cell h-full overflow-hidden">
                 {post.frontmatter.coverImage && (
                   <div className="aspect-video overflow-hidden">

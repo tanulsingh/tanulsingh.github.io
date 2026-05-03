@@ -16,6 +16,7 @@ export interface Post {
   frontmatter: PostFrontmatter;
   content: string;
   readingTime: string;
+  basePath: string;
 }
 
 export interface ProjectData {
