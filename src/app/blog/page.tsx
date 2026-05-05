@@ -23,9 +23,9 @@ export default function BlogPage() {
 
   const seriesPosts = SERIES.map((series) => ({
     ...series,
-    posts: posts.filter((p) =>
-      p.frontmatter.tags.includes(series.tag)
-    ),
+    posts: posts
+      .filter((p) => p.frontmatter.tags.includes(series.tag))
+      .sort((a, b) => new Date(a.frontmatter.date).getTime() - new Date(b.frontmatter.date).getTime()),
   }));
 
   const standalonePosts = posts.filter(

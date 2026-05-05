@@ -1,0 +1,258 @@
+---
+title: "Positional Encoding Part 1 — Why Transformers Need to Know Where Words Are"
+date: "2026-05-03"
+tags: ["Transformers", "NLP", "Positional Encoding", "The Gradient Descent through Transformers"]
+author: "Tanul Singh"
+description: "Transformers have no built-in sense of order. Positional encoding is how we fix that — from sinusoidal functions to learned embeddings, and why neither was good enough."
+summary: "Without positional encoding, a transformer treats 'the cat sat on the mat' and 'mat the on sat cat the' as identical. This post explains how sinusoidal and learned positional encodings give transformers a sense of order, and why the field moved beyond them."
+featured: true
+---
+
+*This is Part 2 of **The Gradient Descent through Transformers** — a series where I walk through every component of the modern transformer stack, how it evolved from 2017 to 2026, and why each piece matters.*
+
+*Previously: [Tokenization — The First Gradient Descent Step](/blog/tokenization)*
+
+---
+
+In the [previous post](/blog/tokenization), we turned text into tokens — sequences of integers. Now those tokens need to go into the transformer. But there's a fundamental problem: **transformers have no built-in concept of order.**
+
+## Why Self-Attention Is "Blind" to Position
+
+To understand why we need positional encoding, we need to understand what self-attention actually computes — and what it throws away.
+
+### How RNNs Get Position for Free
+
+An RNN processes tokens **one at a time, left to right**. At step 5, the hidden state carries information from steps 1 through 4. Position is baked into the computation — the model *knows* the 5th token came after the 4th because it literally processed them in that order. The sequential structure IS the position information.
+
+### How Self-Attention Loses Position
+
+A transformer does something fundamentally different. Self-attention computes, for every token, a weighted sum of all other tokens:
+
+$$\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V$$
+
+Let's trace what happens. Given input tokens `["the", "cat", "sat"]` with embeddings $[e_1, e_2, e_3]$:
+
+1. Each embedding gets projected into Query, Key, Value: $q_i = e_i W_Q$, $k_i = e_i W_K$, $v_i = e_i W_V$
+2. Attention scores are computed: $\text{score}(i, j) = q_i \cdot k_j$
+3. Each token's output is a weighted sum of all values
+
+Now here's the critical observation: **look at step 2.** The score between token $i$ and token $j$ is $q_i \cdot k_j = (e_i W_Q) \cdot (e_j W_K)$. This depends on the *content* of tokens $i$ and $j$ — what the words are — but **nothing in this computation knows that $i$ came before $j$.**
+
+If you shuffle the input from `["the", "cat", "sat"]` to `["sat", "the", "cat"]`, the same set of dot products gets computed, just in a different order. The attention weights between "the" and "cat" are identical regardless of where they appear in the sequence.
+
+### Permutation Invariance — What It Means
+
+Mathematically, this property is called **permutation invariance**: if you rearrange the input tokens in any order, the self-attention output (after rearranging back) is exactly the same.
+
+Let's make this visceral with an example:
+
+**Input A:** `"dog bites man"` → embeddings $[e_{\text{dog}}, e_{\text{bites}}, e_{\text{man}}]$
+
+**Input B:** `"man bites dog"` → embeddings $[e_{\text{man}}, e_{\text{bites}}, e_{\text{dog}}]$
+
+In both cases, self-attention computes the same set of pairwise dot products: $e_{\text{dog}} \cdot e_{\text{bites}}$, $e_{\text{dog}} \cdot e_{\text{man}}$, $e_{\text{bites}} \cdot e_{\text{man}}$. The attention weight between "dog" and "bites" is the same in both sentences. But these sentences have **opposite meanings** — in one the dog is the agent, in the other the dog is the victim. Without position information, the model literally cannot tell them apart.
+
+This isn't a subtle theoretical issue. It means a transformer without positional encoding:
+- Cannot distinguish `"I am not happy"` from `"not I am happy"` from `"happy am I not"`
+- Cannot tell if a word is at the beginning or end of a sentence
+- Cannot learn grammar, because grammar IS word order
+- Would treat language as a **bag of words** — the same representation the field had in 2005
+
+### Why This Is Surprising
+
+If you've used GPT or any LLM, you know they understand word order perfectly well. They can parse complex syntax, follow instructions, write coherent paragraphs. So clearly something fixes this. That something is positional encoding — and it turns out to be one of the most consequential design decisions in the entire transformer architecture.
+
+## The Core Idea
+
+The concept is simple: **give the transformer a way to know where each token is in the sequence.**
+
+But before we look at solutions, we need to think about **what a good positional encoding must achieve**. These requirements shaped every approach that followed:
+
+1. **Unique for each position**: position 0 should have a different encoding than position 1, which should be different from position 2. Otherwise the model still can't tell positions apart.
+2. **Consistent across sequences**: position 5 should mean the same thing whether the sequence is 10 tokens long or 1000 tokens long. The encoding shouldn't depend on context or sequence length.
+3. **Bounded values**: the encoding shouldn't grow unboundedly as position increases. If position 500 produces a huge number, it would dominate the token embedding and drown out the actual word meaning.
+4. **Relative distances should be learnable**: given positions $i$ and $j$, the model should be able to figure out the distance $i - j$ between them. Language cares about relative position ("the word *before* the verb") more than absolute position ("the word at position 7").
+5. **Generalization**: ideally, the encoding should work for sequences longer than those seen during training.
+
+The simplest idea — just use the position number itself ($PE(pos) = pos$) — fails badly. Position 500 would be a huge number that dwarfs the token embedding (requirement 3). And there's no easy way for the model to compute that position 7 and position 10 are "3 apart" from raw integers (requirement 4). We also can't just normalize to [0, 1] because then the same position gets different values in different length sequences (requirement 2).
+
+These requirements rule out most naive approaches. The solutions that work are more clever.
+
+There are two fundamental approaches:
+
+1. **Add a position vector to the token embedding**: $\text{input}_i = \text{token\_embedding}_i + \text{position\_encoding}_i$
+2. **Modify the attention computation directly** (this is the relative position approach — covered in the next post)
+
+This post covers approach 1. The next post covers approach 2.
+
+## Sinusoidal Positional Encoding (Vaswani et al., 2017)
+
+The original ["Attention Is All You Need"](https://arxiv.org/abs/1706.03762) paper introduced positional encoding using sine and cosine functions. It's elegant, and understanding it deeply reveals why positional encoding is tricky.
+
+### The Formula
+
+Vaswani et al.'s solution uses sine and cosine waves of different frequencies:
+
+$$PE_{(pos, 2i)} = \sin\left(\frac{pos}{10000^{2i/d_{\text{model}}}}\right)$$
+
+$$PE_{(pos, 2i+1)} = \cos\left(\frac{pos}{10000^{2i/d_{\text{model}}}}\right)$$
+
+Where:
+- $pos$ is the position in the sequence (0, 1, 2, ...)
+- $i$ is the dimension index (0, 1, 2, ... $d_{\text{model}}/2$)
+- $d_{\text{model}}$ is the embedding dimension (e.g., 512)
+
+This looks intimidating, but let's unpack it piece by piece. First, play with the visualizer below — pick two positions and see how their PE vectors compare across dimensions.
+
+The table shows each dimension's value for both positions. **Lower dimensions (dim 0, 2, 4...)** have high frequencies — they oscillate rapidly, so even positions 1 apart look different there. **Higher dimensions (dim 60, 80, 100...)** have low frequencies — they change very slowly, so nearby positions look nearly identical there but far-apart positions finally differ.
+
+Try setting positions 3 and 5 (close together), then 3 and 150 (far apart) — see which dimensions help distinguish each case:
+
+<PEVisualizer />
+
+Now let's understand why it looks this way.
+
+### What Does the PE Vector Actually Look Like?
+
+Let's make this concrete. For a model with $d_{\text{model}} = 512$, the positional encoding for a token at position $pos$ is a 512-dimensional vector. Each consecutive pair of dimensions uses a sine and cosine at a specific frequency:
+
+$$PE(pos) = \begin{bmatrix} \sin(pos / 10000^{0/512}) \\ \cos(pos / 10000^{0/512}) \\ \sin(pos / 10000^{2/512}) \\ \cos(pos / 10000^{2/512}) \\ \vdots \\ \sin(pos / 10000^{510/512}) \\ \cos(pos / 10000^{510/512}) \end{bmatrix}$$
+
+That's 256 sine/cosine pairs, each at a different frequency. Let's rewrite this more cleanly by defining the frequency for each dimension pair:
+
+$$\omega_i = \frac{1}{10000^{2i/d_{\text{model}}}}$$
+
+Now the formula becomes simply:
+
+$$PE(pos, \omega_i) = \begin{bmatrix} \sin(\omega_i \cdot pos) \\ \cos(\omega_i \cdot pos) \end{bmatrix}$$
+
+The key: **as $i$ increases, $\omega_i$ decreases.** Dimension pair 0 has the highest frequency (oscillates rapidly). Dimension pair 255 has the lowest frequency (oscillates extremely slowly). This is where the intuition comes from.
+
+### The Clock Analogy
+
+Each dimension pair is a clock ticking at a different speed:
+
+**Starting dimensions (small $i$, high $\omega_i$) = seconds hand.** These oscillate rapidly — their value changes significantly between position 5 and position 6. They capture **local uniqueness**, making it easy for the model to tell nearby positions apart.
+
+**Deep dimensions (large $i$, low $\omega_i$) = hour hand.** These are slow, barely changing waves. Their primary role is to provide **long-range, global position** information. Since they change slowly, they're almost the same for positions 5 and 6 — but they're very different for positions 5 and 500.
+
+Together, all these clocks at different frequencies create a **unique fingerprint for every position** — just like how combining the hour hand, minute hand, and second hand uniquely identifies any time of day. This is how the model learns a "multi-scale clock" to understand the complete positional picture.
+
+### Why Sine AND Cosine? The Rotation Property
+
+This is the real reason the design works, and it's beautiful.
+
+Why not just use sine? Because using the pair $(\sin(\omega_i \cdot pos), \cos(\omega_i \cdot pos))$ gives us a critical property: **the encoding for position $pos + k$ can be computed as a linear transformation of the encoding at position $pos$.**
+
+Let's derive this step by step. We want to express $PE(pos+k)$ in terms of $PE(pos)$. Using the trigonometric addition formulas:
+
+$$\sin(\omega_i(pos + k)) = \sin(\omega_i \cdot pos)\cos(\omega_i \cdot k) + \cos(\omega_i \cdot pos)\sin(\omega_i \cdot k)$$
+
+$$\cos(\omega_i(pos + k)) = \cos(\omega_i \cdot pos)\cos(\omega_i \cdot k) - \sin(\omega_i \cdot pos)\sin(\omega_i \cdot k)$$
+
+We can write this in matrix form:
+
+$$\begin{bmatrix} PE(pos+k, 2i) \\ PE(pos+k, 2i+1) \end{bmatrix} = \begin{bmatrix} \cos(\omega_i k) & \sin(\omega_i k) \\ -\sin(\omega_i k) & \cos(\omega_i k) \end{bmatrix} \begin{bmatrix} PE(pos, 2i) \\ PE(pos, 2i+1) \end{bmatrix}$$
+
+Or more compactly: $PE(pos+k) = R_k \cdot PE(pos)$
+
+That matrix $R_k$ is a **2D rotation matrix.** Moving from position $pos$ to position $pos + k$ is equivalent to rotating the positional encoding vector by angle $\omega_i \cdot k$.
+
+This is the key insight: **there exists a fixed matrix that transforms any position's encoding into the encoding of a position $k$ steps away.** The neural network doesn't need to "know" absolute positions — it just needs to learn this rotation matrix $R_k$. Once it learns $R_k$ for a given offset $k$, it can compute "the token $k$ positions away from me" from *any* starting position. This is how the model gains an understanding of relative position despite being given absolute encodings.
+
+In other words: the authors chose sine and cosine specifically so that relative positional information would be expressible as a simple linear operation that the network's weight matrices can learn.
+
+**Why this matters:**
+
+1. **The rotation depends only on $k$, not on $pos$.** Whether you're at position 3 or position 300, shifting by $k=5$ positions applies the same rotation. The network learns one matrix for "5 positions ahead" and it works everywhere in the sequence — it doesn't need to separately learn "position 3 attending to position 8" and "position 100 attending to position 105."
+
+2. **The dot product captures relative position.** The dot product of two positional encodings $PE(pos) \cdot PE(pos + k)$ depends only on the offset $k$, not on the absolute position $pos$. This means when the attention mechanism computes $Q \cdot K^T$ (which involves dot products), the relative distance between tokens naturally influences the attention score.
+
+3. **This is a precursor to RoPE.** The idea that positional information can be encoded as rotations will come back in a big way when we discuss Rotary Position Embedding in the next post — which takes this rotation idea and applies it directly inside the attention computation rather than adding it to the input.
+
+### The Strengths
+
+- **No learned parameters**: the encoding is a fixed mathematical function, adding zero parameters to the model.
+- **Generalizes to any length (in theory)**: the formula can generate encodings for any position, even ones never seen during training.
+- **Relative offsets are linear**: the rotation property means relative position information is accessible to linear layers.
+
+### The Weaknesses
+
+- **Information diffusion**: the positional encoding is added to the token embedding **once, at the input layer**, and then must survive through every transformer layer. After multiple layers of attention and feed-forward processing, the position signal can get diluted or washed out. The model has no way to "refresh" its sense of position deeper in the network.
+- **Fixed, not adaptive**: every position gets the same encoding regardless of context. Position 5 gets the same encoding whether it's in a question or an answer, code or prose.
+- **Extrapolation is fragile in practice**: while the formula *can* generate encodings for position 10000 even if training used max length 512, the model's attention patterns have only learned to work with the position values it saw during training. Unseen position values produce attention behaviors the model was never trained for.
+- **Relative position is implicit, not explicit**: while the rotation property *allows* the model to learn relative offsets, it has to discover this on its own from data. Nothing in the architecture explicitly tells the model "these two tokens are 3 apart." The model must use its limited capacity to learn the rotation matrices — capacity that could otherwise be spent on understanding language. Methods like RoPE (next post) make relative position explicit in the attention computation, removing this learning burden entirely.
+
+## Learned Positional Embeddings (BERT, GPT-2)
+
+Given the limitations of sinusoidal encoding, the next idea was straightforward: **let the model learn position encodings from data.**
+
+### How It Works
+
+Create a position embedding matrix $P \in \mathbb{R}^{L \times d}$ where $L$ is the maximum sequence length and $d$ is the embedding dimension. This matrix is a learnable parameter, just like the token embedding matrix.
+
+For a token at position $pos$:
+$$\text{input}_{pos} = \text{token\_embedding}_{pos} + P[pos]$$
+
+That's it. $P[pos]$ is just a lookup into a learned table, exactly like how token embeddings work.
+
+### Who Uses This
+
+- **BERT** (Devlin et al., 2019): learned positional embeddings with max length 512
+- **GPT-2** (Radford et al., 2019): learned positional embeddings with max length 1024
+- **GPT-3**: learned positional embeddings with max length 2048
+
+### The Advantages Over Sinusoidal
+
+- **Data-driven**: the model discovers what position patterns are actually useful for the task, rather than being constrained by a fixed formula.
+- **More expressive**: each position can encode arbitrary patterns, not just sine/cosine waves.
+- **In practice, slightly better**: BERT and GPT-2 found that learned embeddings performed marginally better than sinusoidal ones on downstream tasks.
+
+### The Fundamental Limitations
+
+Both sinusoidal and learned positional encodings share the same fundamental problem: they encode **absolute position**.
+
+**Problem 1: Fixed maximum length.**
+
+Learned embeddings for max length 512 literally don't have an entry for position 513. You can't process longer sequences without retraining or interpolation hacks. Sinusoidal encoding can *mathematically* extend, but in practice the model hasn't learned to use those extended positions.
+
+**Problem 2: Absolute position is often the wrong information.**
+
+Consider: `"The cat sat on the mat"`. The relationship between `"cat"` (position 1) and `"sat"` (position 2) is "subject and verb, 1 position apart." Now consider `"The big fluffy cat sat on the mat"`. Now `"cat"` is at position 3 and `"sat"` is at position 4. The absolute positions changed, but the relationship is the same — subject and verb, 1 position apart.
+
+With absolute encoding, the model has to learn "position 1 attending to position 2 means subject-verb" AND "position 3 attending to position 4 means subject-verb" as separate patterns. With relative encoding (covered in the next post), it just learns "1 position apart means subject-verb" — once.
+
+**Problem 3: No length generalization.**
+
+A model trained on sequences of length 512 should, in principle, handle sequences of length 1024 — it's the same language, just more of it. But absolute positional encodings make every position a unique identity. The model has never seen "position 600" during training, so it has no idea what to do with it.
+
+These limitations drove the field toward relative positional encodings — ALiBi, T5's relative bias, and eventually RoPE — which we'll cover in the next post.
+
+## Sinusoidal vs Learned: A Practical Summary
+
+| | Sinusoidal | Learned |
+|---|---|---|
+| Parameters | Zero | $L \times d$ (e.g., 512 × 768 = 393K for BERT) |
+| Extrapolation | Mathematically possible, practically fragile | Impossible beyond $L$ |
+| Expressiveness | Constrained to sine/cosine patterns | Arbitrary |
+| Training data needed | None | Needs enough data to learn good positions |
+| Performance | Slightly worse in practice | Slightly better |
+| Used by | Original Transformer, some recent models | BERT, GPT-2, GPT-3 |
+
+In modern LLMs (2024+), **neither is used.** Both were superseded by relative positional methods — particularly RoPE (Rotary Position Embedding) — which solve the length generalization problem and encode relative positions directly in the attention computation.
+
+---
+
+## References & Further Reading
+
+- **[Attention Is All You Need](https://arxiv.org/abs/1706.03762)** (Vaswani et al., 2017) — The original transformer paper that introduced sinusoidal positional encoding.
+- **[BERT: Pre-training of Deep Bidirectional Transformers](https://arxiv.org/abs/1810.04805)** (Devlin et al., 2019) — Introduced learned positional embeddings for encoder models.
+- **[Language Models are Unsupervised Multitask Learners](https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf)** (Radford et al., 2019) — GPT-2, which used learned positional embeddings.
+- **[A Survey on Positional Encoding in Transformers](https://arxiv.org/abs/2408.08745)** — Comprehensive survey of all positional encoding methods.
+- **[The Illustrated Transformer](https://jalammar.github.io/illustrated-transformer/)** by Jay Alammar — Excellent visual explanation of the original transformer including positional encoding.
+
+---
+
+*Next in the series: **Positional Encoding Part 2 — RoPE, ALiBi, and the Quest for Length Generalization** — how relative positional methods solved the limitations of absolute encoding.*
+
+*This post is part of [The Gradient Descent through Transformers](/blog) — a series dissecting every component of the modern transformer stack.*

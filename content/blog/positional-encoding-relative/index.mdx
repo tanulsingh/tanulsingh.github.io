@@ -1,0 +1,302 @@
+---
+title: "Positional Encoding Part 2 — RoPE, ALiBi, and the Quest for Length Generalization"
+date: "2026-05-05"
+tags: ["Transformers", "NLP", "Positional Encoding", "RoPE", "The Gradient Descent through Transformers"]
+author: "Tanul Singh"
+description: "Absolute position encodings hit a wall. Relative methods — T5 bias, ALiBi, and RoPE — solved it by encoding position where it actually matters: inside the attention computation itself."
+summary: "The shift from absolute to relative positional encoding was one of the most important architectural changes in modern LLMs. This post covers T5's relative bias, ALiBi's simplicity, and RoPE's elegant rotation — the method that won and powers every major LLM today."
+featured: true
+---
+
+*This is Part 3 of **The Gradient Descent through Transformers** — a series where I walk through every component of the modern transformer stack, how it evolved from 2017 to 2026, and why each piece matters.*
+
+*Previously: [Positional Encoding Part 1 — Why Transformers Need to Know Where Words Are](/blog/positional-encoding-absolute)*
+
+---
+
+In the [previous post](/blog/positional-encoding-absolute), we saw how sinusoidal and learned positional encodings give transformers a sense of order by adding position vectors to the input. We also saw their fundamental weaknesses:
+
+- Position information is added once and dilutes through layers
+- The model must *learn* to extract relative distances — it's not explicit
+- Extrapolation to longer sequences fails
+
+All of these stem from the same root problem: **absolute position is the wrong abstraction for language.** When you read "the cat sat on the mat," you don't think "the word at position 1 relates to the word at position 2." You think "the subject is *right before* the verb." Relative position — how far apart things are — is what matters.
+
+This post covers the three major approaches that moved position encoding from the input layer into the attention mechanism itself: T5's relative bias, ALiBi, and RoPE.
+
+## The Key Shift: From Input to Attention
+
+In absolute methods, position information lives in the input:
+
+$$\text{input}_i = \text{embedding}_i + \text{PE}(i)$$
+
+The attention computation then has to *hope* that position information survives through the Q, K projections and the dot product. It's indirect.
+
+Relative methods take a fundamentally different approach: **inject position information directly into the attention scores.** Instead of modifying the input, they modify what the model pays attention to. The attention score between tokens $i$ and $j$ becomes a function of both their content AND their relative distance $i - j$:
+
+$$\text{score}(i, j) = f(\text{content}_i, \text{content}_j, i - j)$$
+
+This is a stronger inductive bias. The model doesn't have to learn that position matters — the architecture explicitly encodes it in every attention computation, at every layer.
+
+## T5's Relative Position Bias (Raffel et al., 2020)
+
+[T5](https://arxiv.org/abs/1910.10683) (Raffel et al., 2020) introduced one of the first successful relative position methods. The idea is elegantly simple.
+
+### How It Works
+
+After computing the standard content-based attention scores $QK^T$, T5 **adds a learned bias** based on the relative distance between the query and key positions:
+
+$$\text{score}(i, j) = q_i \cdot k_j + b(i - j)$$
+
+Where $b(i - j)$ is a learned scalar looked up from a bias table indexed by the relative distance $i - j$.
+
+That's it. No modification to Q, K, or V. No special embeddings. Just a learned number added to each attention score based on how far apart the two tokens are.
+
+### The Bias Table
+
+The bias table maps relative distances to scalar values. For example:
+
+| Relative distance $(i - j)$ | Learned bias $b$ |
+|---|---|
+| 0 (same position) | +2.1 |
+| 1 (adjacent, looking back) | +1.8 |
+| 2 | +1.2 |
+| 5 | +0.4 |
+| 10 | -0.1 |
+| 50 | -0.8 |
+
+The model typically learns positive biases for nearby tokens (encouraging local attention) and negative or near-zero biases for distant tokens.
+
+### Bucketing for Efficiency
+
+A naive implementation would need a bias entry for every possible distance from $-L$ to $+L$. For long sequences, that's impractical. T5 uses **logarithmic bucketing**: nearby distances get exact entries (distance 0, 1, 2, ... up to some threshold), while larger distances share buckets (distances 50-100 might all use the same bias value).
+
+This reflects a linguistic intuition: the difference between "1 token away" and "2 tokens away" matters a lot. The difference between "50 tokens away" and "51 tokens away" barely matters.
+
+### Strengths
+
+- **Simple and intuitive**: just add a number based on distance.
+- **Each attention head learns its own bias table**: some heads can become "local" (strongly prefer nearby tokens) while others become "global" (uniform or long-range attention). This specialization happens naturally.
+- **Position information at every layer**: unlike absolute PE which is added once at the input, the relative bias is applied at every attention layer. No information diffusion problem.
+
+### Limitations
+
+- **The bias table is finite**: if the table covers distances up to 128, the model doesn't know what to do with distance 200. Extrapolation beyond the trained range is undefined.
+- **Extra parameters**: each attention head has its own bias table. With 12 heads × 128 buckets, that's 1,536 learned parameters per layer — small but nonzero.
+- **Content and position are independent**: the bias $b(i-j)$ doesn't interact with the content. The model can't learn "attend to the nearest *verb*" — only "attend to nearby tokens" regardless of what they are.
+
+## ALiBi: Attention with Linear Biases (Press et al., 2022)
+
+[ALiBi](https://arxiv.org/abs/2108.12409) (Press et al., 2022) asked: what if we don't even need to *learn* the position biases? What if a fixed, simple formula works just as well?
+
+### The Idea
+
+Instead of a learned bias table, ALiBi adds a **fixed linear penalty** based on distance:
+
+$$\text{score}(i, j) = q_i \cdot k_j - m \cdot |i - j|$$
+
+Where $m$ is a fixed slope (not learned) that varies per attention head.
+
+In words: the farther apart two tokens are, the more the attention score is penalized. The penalty grows linearly with distance. Each head has a different slope $m$, giving heads different "attention windows."
+
+### Head-Specific Slopes
+
+The slopes are set using a geometric sequence. For 8 heads:
+
+$$m \in \left\{\frac{1}{2^1}, \frac{1}{2^2}, \frac{1}{2^3}, \frac{1}{2^4}, \frac{1}{2^5}, \frac{1}{2^6}, \frac{1}{2^7}, \frac{1}{2^8}\right\}$$
+
+$$= \{0.5, 0.25, 0.125, 0.0625, 0.03125, ...\}$$
+
+Head 1 (slope 0.5): aggressive locality — attention drops off quickly with distance. This head focuses on immediate neighbors.
+
+Head 8 (slope 0.0039): very gradual penalty — can attend to tokens hundreds of positions away. This head captures long-range dependencies.
+
+### Why It Works Despite Being So Simple
+
+ALiBi works because:
+
+1. **Language is already local**: most important dependencies in language are nearby. A subject is usually close to its verb. A pronoun is close to its referent. The linear penalty just formalizes this prior.
+
+2. **Different heads handle different scales**: the geometric slopes give the model both local and global attention in the same layer, without learning.
+
+3. **No position encoding to dilute**: since there's no additive PE in the input, the token embeddings are pure content vectors. Position lives entirely in the attention scores where it's used.
+
+### The Extrapolation Breakthrough
+
+ALiBi's biggest contribution: **it extrapolates to longer sequences than it was trained on.** If you train a model with ALiBi on sequences of length 1024, it works reasonably well on sequences of length 2048 or 4096 at inference time.
+
+Why? Because the linear penalty formula $-m \cdot |i - j|$ is defined for any distance. There's no table to run out of, no learned position embedding to be undefined. Position 2000 naturally gets a larger penalty from position 0 — the formula just works.
+
+This was a major result. Previous methods (sinusoidal, learned, T5 bias) all degraded sharply beyond training length. ALiBi showed that extrapolation is possible with the right design.
+
+### Limitations
+
+- **Fixed, not learned**: the slopes can't adapt to the task. If a specific task needs unusual attention patterns, ALiBi can't accommodate.
+- **Linear assumption**: the penalty is always linear with distance. Some tasks might benefit from more complex decay patterns (e.g., sharp local attention with a long flat tail for retrieval).
+- **Still absolute in disguise**: the penalty depends on $|i - j|$ which is computed from absolute positions. It doesn't capture richer relative relationships (e.g., "same sentence" vs "different sentence").
+
+## RoPE: Rotary Position Embedding (Su et al., 2021)
+
+[RoPE](https://arxiv.org/abs/2104.09864) (Su et al., 2021) is the method that won. It powers **Llama, Mistral, Qwen, Gemma, PaLM, Phi, and virtually every major LLM from 2023 onward.** Understanding RoPE deeply is essential.
+
+### The Core Insight
+
+Remember from Part 1 that sinusoidal positional encoding has a rotation property: $PE(pos+k) = R_k \cdot PE(pos)$. The encoding for a shifted position is a rotation of the original encoding.
+
+RoPE takes this idea and asks: **what if instead of adding position to the input, we apply the rotation directly to the Query and Key vectors inside the attention computation?**
+
+### How It Works
+
+In standard attention, the dot product between query $q_i$ and key $k_j$ measures content similarity:
+
+$$\text{score}(i, j) = q_i \cdot k_j$$
+
+In RoPE, we rotate $q_i$ by position $i$ and rotate $k_j$ by position $j$ before taking the dot product:
+
+$$\text{score}(i, j) = (R_i \cdot q_i) \cdot (R_j \cdot k_j)$$
+
+Where $R_i$ is a rotation matrix determined by position $i$.
+
+### Why This Encodes Relative Position
+
+Here's the beautiful part. The dot product of two rotated vectors has this property:
+
+$$(R_i \cdot q) \cdot (R_j \cdot k) = q \cdot R_{j-i} \cdot k$$
+
+The dot product depends on $R_{j-i}$ — a rotation by the **relative distance** $j - i$. The absolute positions $i$ and $j$ disappear, and only their difference remains.
+
+This means:
+- Token at position 3 attending to token at position 7: rotation by offset 4
+- Token at position 100 attending to token at position 104: same rotation by offset 4
+- **Identical relative position → identical effect on attention scores**
+
+### The Rotation in Detail
+
+RoPE operates on pairs of dimensions. For a $d$-dimensional vector, it groups dimensions into $d/2$ pairs and applies a 2D rotation to each pair:
+
+For dimensions $(2i, 2i+1)$, the rotation for position $pos$ is:
+
+$$\begin{bmatrix} q_{2i}^{\text{rotated}} \\ q_{2i+1}^{\text{rotated}} \end{bmatrix} = \begin{bmatrix} \cos(pos \cdot \theta_i) & -\sin(pos \cdot \theta_i) \\ \sin(pos \cdot \theta_i) & \cos(pos \cdot \theta_i) \end{bmatrix} \begin{bmatrix} q_{2i} \\ q_{2i+1} \end{bmatrix}$$
+
+Where $\theta_i = 10000^{-2i/d}$ — the same frequency formula as sinusoidal PE!
+
+Each dimension pair gets rotated by a different amount (determined by position and frequency). Low-dimensional pairs rotate quickly (capturing local position). High-dimensional pairs rotate slowly (capturing global position). It's the same multi-frequency clock idea — but applied as a rotation to Q and K rather than an addition to the input.
+
+### A Worked Example: RoPE on a 4D Vector
+
+Let's trace through the full computation to make this concrete. Take a tiny model with $d = 4$ (so $d/2 = 2$ dimension pairs).
+
+**The sequence:** `["The", "cat", "sat"]` at positions 0, 1, 2.
+
+**Frequencies for each dimension pair:**
+- Pair 0 (dims 0,1): $\theta_0 = 1/10000^{0/4} = 1.0$ — fast
+- Pair 1 (dims 2,3): $\theta_1 = 1/10000^{2/4} = 0.01$ — slow
+
+**Say "cat" at position 1 has query vector** $q = [1.0, 0.5, 0.8, -0.3]$ after the Q projection.
+
+Split into pairs:
+- Pair 0: $[q_0, q_1] = [1.0, 0.5]$
+- Pair 1: $[q_2, q_3] = [0.8, -0.3]$
+
+**Rotate each pair by $\theta_i \times pos$:**
+
+Pair 0: angle = $\theta_0 \times 1 = 1.0 \times 1 = 1.0$ radian (57.3°)
+
+$$\begin{bmatrix} \cos(1.0) & -\sin(1.0) \\ \sin(1.0) & \cos(1.0) \end{bmatrix} \begin{bmatrix} 1.0 \\ 0.5 \end{bmatrix} = \begin{bmatrix} 0.54 \times 1.0 + (-0.84) \times 0.5 \\ 0.84 \times 1.0 + 0.54 \times 0.5 \end{bmatrix} = \begin{bmatrix} 0.12 \\ 1.11 \end{bmatrix}$$
+
+Pair 1: angle = $\theta_1 \times 1 = 0.01 \times 1 = 0.01$ radian (0.57° — barely moves!)
+
+$$\begin{bmatrix} \cos(0.01) & -\sin(0.01) \\ \sin(0.01) & \cos(0.01) \end{bmatrix} \begin{bmatrix} 0.8 \\ -0.3 \end{bmatrix} = \begin{bmatrix} 1.0 \times 0.8 + (-0.01) \times (-0.3) \\ 0.01 \times 0.8 + 1.0 \times (-0.3) \end{bmatrix} \approx \begin{bmatrix} 0.80 \\ -0.29 \end{bmatrix}$$
+
+**Rotated query for "cat" at pos 1:** $q_{rot} = [0.12, 1.11, 0.80, -0.29]$
+
+Notice: pair 0 got rotated significantly (57°), pair 1 barely changed (0.57°). This is the multi-speed clock in action.
+
+**Now do the same for every token:**
+
+| Token | Pos | Pair 0 angle | Pair 1 angle |
+|---|---|---|---|
+| "The" | 0 | $1.0 \times 0 = 0$ rad (no rotation) | $0.01 \times 0 = 0$ rad |
+| "cat" | 1 | $1.0 \times 1 = 1.0$ rad | $0.01 \times 1 = 0.01$ rad |
+| "sat" | 2 | $1.0 \times 2 = 2.0$ rad | $0.01 \times 2 = 0.02$ rad |
+
+Every token's Q and K vectors undergo this same process — split into pairs, each pair rotated by its own angle based on position.
+
+**The attention computation:**
+
+When "cat" (pos 1) attends to "sat" (pos 2), the dot product of their rotated Q and K vectors is computed. In pair 0, the relative rotation is $\theta_0 \times (1-2) = -1.0$ rad. In pair 1, it's $\theta_1 \times (1-2) = -0.01$ rad.
+
+If "cat" were at position 50 and "sat" at position 51, the relative rotations would be exactly the same: $-1.0$ rad and $-0.01$ rad. **Same offset → same rotations → same dot product → same attention score.**
+
+This is how RoPE achieves true relative position encoding: every token gets rotated independently by its absolute position, but the attention mechanism only ever sees the *difference* in rotations — which is the relative distance.
+
+### See It in Action
+
+Now that you understand the rotation mechanics, play with the visualizer below. Remember: the full Q and K vectors have $d/2$ dimension pairs, each rotating at a different speed $\theta_i$. This visualizer shows what happens in **one** dimension pair — you can adjust $\theta_i$ to simulate different pairs (high $\theta$ = low dimension pair that rotates fast, low $\theta$ = high dimension pair that rotates slowly).
+
+The key experiment: **keep the offset (i−j) the same but change both absolute positions.** Watch how the individual vectors rotate to completely different angles — but the dot product stays constant. That's RoPE: absolute positions change everything visually, but the attention score depends only on the relative distance.
+
+<RoPEVisualizer />
+
+### Why RoPE Won
+
+1. **Truly relative**: the attention score depends only on $i - j$, not on absolute positions. This is the cleanest relative position encoding possible.
+
+2. **Content-position interaction**: unlike T5 bias or ALiBi which add position independently from content, RoPE *rotates* the content vectors. The attention score is a function of both content AND relative position simultaneously. The model can learn "attend to the nearest token that looks like a verb" — not just "attend to nearby tokens."
+
+3. **No extra parameters**: like sinusoidal PE, RoPE is a fixed mathematical transformation with zero learned parameters for position.
+
+4. **Position at every layer**: the rotation is applied to Q and K at every attention layer. No information diffusion problem — position is refreshed at every layer.
+
+5. **Compatible with KV caching**: during inference, once a key vector is computed and rotated for position $j$, it stays valid regardless of what future tokens appear. This makes autoregressive generation with KV cache straightforward.
+
+6. **Length extension via interpolation**: by scaling the frequencies $\theta_i$, you can extend the context window beyond training length. This led to techniques like NTK-aware interpolation and YaRN that extend Llama's 4K context to 100K+ with minimal quality loss.
+
+### The Frequency Base: 10000 and Beyond
+
+The choice of base 10000 determines how quickly each dimension pair rotates. Recent work (including Llama 3's "rope_theta" of 500000) has shown that **increasing the base** extends the context window — it makes all rotations slower, allowing the model to distinguish positions farther apart.
+
+Llama 2: base = 10000, context = 4096
+Llama 3: base = 500000, context = 128K
+
+This is a simple but powerful knob for scaling context length.
+
+## Comparison: The Evolution
+
+| Method | Year | Position in arch | Relative? | Extrapolation | Used by |
+|---|---|---|---|---|---|
+| Sinusoidal | 2017 | Input (additive) | Implicit | Poor | Original Transformer |
+| Learned | 2018 | Input (additive) | No | None | BERT, GPT-2/3 |
+| T5 Bias | 2020 | Attention scores | Yes (learned) | Limited | T5, Flan-T5 |
+| ALiBi | 2022 | Attention scores | Yes (fixed) | Good | BLOOM, MPT |
+| RoPE | 2021 | Q,K rotation | Yes (implicit) | Extensible | Llama, Mistral, Qwen, Gemma, PaLM, Phi |
+
+### The Clear Winner
+
+RoPE dominates for a reason: it's the only method that simultaneously achieves:
+- True relative position encoding
+- Content-position interaction (not independent)
+- Zero extra parameters
+- Position information at every layer
+- Compatibility with efficient inference (KV cache)
+- Extensible context length via frequency scaling
+
+The field isn't debating position encoding anymore. RoPE won. The remaining research is about how to extend its effective context length further (NTK interpolation, YaRN, LongRoPE) and how to combine it with other attention modifications.
+
+---
+
+## References & Further Reading
+
+- **[Attention Is All You Need](https://arxiv.org/abs/1706.03762)** (Vaswani et al., 2017) — The original transformer with sinusoidal positional encoding.
+- **[Exploring the Limits of Transfer Learning with a Unified Text-to-Text Transformer](https://arxiv.org/abs/1910.10683)** (Raffel et al., 2020) — T5, which introduced relative position bias.
+- **[Train Short, Test Long: Attention with Linear Biases Enables Input Length Generalization](https://arxiv.org/abs/2108.12409)** (Press et al., 2022) — ALiBi paper.
+- **[RoFormer: Enhanced Transformer with Rotary Position Embedding](https://arxiv.org/abs/2104.09864)** (Su et al., 2021) — The RoPE paper.
+- **[Extending Context Window of Large Language Models via Position Interpolation](https://arxiv.org/abs/2306.15595)** (Chen et al., 2023) — Position interpolation for extending RoPE.
+- **[YaRN: Efficient Context Window Extension of Large Language Models](https://arxiv.org/abs/2309.00071)** (Peng et al., 2023) — Advanced RoPE extension.
+- **[The Impact of Positional Encoding on Length Generalization in Transformers](https://arxiv.org/abs/2305.19466)** (Kazemnejad et al., 2023) — Systematic comparison of positional encoding methods.
+
+---
+
+*Next in the series: **Attention Mechanisms** — from vanilla self-attention to Flash Attention, Grouped-Query Attention, and the quest to make attention scale.*
+
+*This post is part of [The Gradient Descent through Transformers](/blog) — a series dissecting every component of the modern transformer stack.*
