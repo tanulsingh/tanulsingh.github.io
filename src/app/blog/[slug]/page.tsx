@@ -45,7 +45,9 @@ export default async function BlogPostPage({ params }: PageProps) {
   const isSeries = post.frontmatter.tags.includes(SERIES_TAG);
   const allPosts = getAllPosts();
   const seriesPosts = isSeries
-    ? allPosts.filter((p) => p.frontmatter.tags.includes(SERIES_TAG))
+    ? allPosts
+        .filter((p) => p.frontmatter.tags.includes(SERIES_TAG))
+        .sort((a, b) => new Date(a.frontmatter.date).getTime() - new Date(b.frontmatter.date).getTime())
     : [];
   const partNumber = seriesPosts.findIndex((p) => p.slug === slug) + 1;
 

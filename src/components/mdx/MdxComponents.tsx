@@ -3,12 +3,16 @@ import { Callout } from "./Callout";
 import { BPEVisualizer } from "./BPEVisualizer";
 import { UnigramVisualizer } from "./UnigramVisualizer";
 import { SentencePieceDemo } from "./SentencePieceDemo";
+import { PEVisualizer } from "./PEVisualizer";
+import { RoPEVisualizer } from "./RoPEVisualizer";
 
 export const mdxComponents: MDXComponents = {
   Callout,
   BPEVisualizer,
   UnigramVisualizer,
   SentencePieceDemo,
+  PEVisualizer,
+  RoPEVisualizer,
 
   img: (props) => (
     <figure className="my-8">
