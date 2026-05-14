@@ -38,3 +38,12 @@ Thumbs.db
 # Old Hugo (can remove after full migration)
 resources/
 .hugo_build.lock
+
+# Claude Code
+.claude/
+.mcp.json
+
+# Manim
+scripts/
+media/
+__pycache__/
