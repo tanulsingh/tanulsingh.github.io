@@ -1,0 +1,95 @@
+---
+title: "Dissecting Gemma 4: Architecture from the Ground Up"
+date: "2026-05-13"
+tags: ["Papers", "Gemma", "Google DeepMind", "Transformers", "MoE", "Paper × Code"]
+author: "Tanul Singh"
+description: "Taking apart Gemma 4 layer by layer — hybrid sliding window and global attention, MoE routing, and every architectural choice that makes it work at 256K context."
+summary: "A complete architectural dissection of Gemma 4: how hybrid attention (sliding window + global layers), Mixture of Experts, and careful design choices compose into a model that handles 256K tokens efficiently."
+featured: true
+---
+
+*Part of the **Paper × Code** series — where we dissect papers and rebuild them from scratch.*
+
+---
+
+<Callout type="warning">
+**Coming Soon.** This post is currently being written. Check back soon for the full architectural dissection.
+</Callout>
+
+---
+
+## What We're Dissecting
+
+**Paper:** Gemma 4 Technical Report  
+**Authors:** Google DeepMind (2025)
+
+**The architecture at a glance:**
+- Multiple variants: E2B, E4B, 26B-A4B (MoE), 31B (dense)
+- Hybrid attention: sliding window (local) + full attention (global) layers
+- Mixture of Experts in the 26B-A4B variant
+- 256K context (larger variants)
+- Builds on Gemma 3's proven hybrid pattern with tighter windows
+
+We'll take each component apart, understand why it's there, and see how the full model composes.
+
+---
+
+## Part 1: Hybrid Attention Design
+
+### Sliding Window Layers
+
+TODO: Window sizes per variant (512 vs 1024). Why different scales need different windows. Rolling KV buffer implementation.
+
+### Global Attention Layers
+
+TODO: Ratio of global to local. Which layers are global. How the "highway" pattern carries long-range information.
+
+### The Evolution from Gemma 3
+
+TODO: What changed from Gemma 3's 1:5 ratio. Why tighter windows work at this scale. The interplay with longer context (128K → 256K).
+
+---
+
+## Part 2: Mixture of Experts (26B-A4B)
+
+### Router Design
+
+TODO: How tokens get routed to experts. Top-k selection. Load balancing.
+
+### Expert Architecture
+
+TODO: Number of experts, active experts per token. FFN structure within each expert.
+
+### When MoE Meets Hybrid Attention
+
+TODO: How MoE layers interact with the hybrid attention pattern. Which layers are MoE vs dense.
+
+---
+
+## Part 3: The Dense Variant (31B)
+
+### Architectural Choices
+
+TODO: How the 31B dense model differs from the MoE variant. Attention configuration. FFN sizing.
+
+### Performance Tradeoffs
+
+TODO: When to choose dense vs MoE. Serving considerations. Quality comparisons.
+
+---
+
+## Part 4: Training and Scaling
+
+### Training Infrastructure
+
+TODO: Data, compute, training details from the report.
+
+### Scaling Decisions
+
+TODO: Why these specific model sizes. The E2B/E4B variants for edge deployment.
+
+---
+
+## Key Takeaways
+
+TODO: What practitioners should take from Gemma 4's design. Reusable patterns at smaller scales. How it compares to DeepSeek-V4 and Qwen 3 Next.

@@ -1,0 +1,342 @@
+---
+title: "Attention Part 2 — The Sharing Lineage: From Multi-Query to Multi-Latent"
+date: "2026-05-11"
+tags: ["Transformers", "NLP", "Attention", "GQA", "MLA", "MQA", "The Gradient Descent through Transformers"]
+author: "Tanul Singh"
+description: "How the field solved attention's KV cache memory crisis — from MQA's radical sharing to GQA's balanced groups, cross-layer reuse, and DeepSeek's latent compression. The complete evolution of KV cache optimization."
+summary: "The complete story of KV cache optimization: Multi-Query Attention, Grouped-Query Attention, Cross-Layer Attention, and Multi-Latent Attention. How each technique trades off memory, diversity, and complexity — and what production models actually chose."
+featured: true
+---
+
+*This is Part 5 of **The Gradient Descent through Transformers** — a series where I walk through every component of the modern transformer stack, how it evolved from 2017 to 2026, and why each piece matters.*
+
+*Previously: [Attention Part 1 — The Mechanism That Changed Everything](/blog/attention-mechanisms)*
+
+---
+
+In Part 1, we built self-attention from scratch and saw how multi-head attention lets a model learn diverse relationship patterns in parallel. We ended with a problem: the **KV cache grows linearly with sequence length and number of heads**, and the **attention matrix grows quadratically with sequence length**. At GPT-3 scale, that's 4.8 billion cached values per forward pass.
+
+This post traces how the field solved that problem — not by changing the hardware, but by redesigning the attention mechanism itself. We'll follow two evolutionary threads:
+
+1. **The head-sharing lineage**: MQA (2019) → GQA (2023) → CLA (2024) → MLA (2024) — reducing memory by sharing or compressing KV across heads and layers
+2. **The sparsity lineage**: Sparse Transformer (2019) → Sliding Window (2020/2023) → Global+Local Hybrid (2025) — reducing compute by limiting which token pairs interact
+
+These threads eventually converge in 2024-2025 with mechanisms like Native Sparse Attention that combine both ideas. Let's trace the full history.
+
+## The Two Costs, Quantified
+
+In [Part 1](/blog/attention-mechanisms#flaw-2-the-kv-cache-during-inference), we explained why the KV cache exists and why it's expensive — and we saw how the quadratic score matrix creates a training-time wall. Here, let's quantify both costs precisely so we can measure the improvements.
+
+### Cost 1: KV Cache During Inference
+
+The KV cache size per layer:
+
+$$\text{KV cache} = 2 \times n_{\text{heads}} \times t \times d_k$$
+
+where $t$ is sequence length and $d_k$ is the per-head dimension. For a 32-head model with $d_k = 128$ serving a 32K-token sequence:
+
+$$2 \times 32 \times 32{,}768 \times 128 = 268{,}435{,}456 \text{ values per layer}$$
+
+In fp16, that's 512 MB per layer. With 80 layers (Llama 3 405B), that's **40 GB of KV cache alone** — just for a single sequence. Serve 8 sequences in parallel and you need 320 GB just for caches, before any model weights.
+
+### Cost 2: Quadratic Score Matrix During Training
+
+The attention score matrix is $n \times n$. At 128K tokens, that's 16.4 billion entries per head per layer. This dominates during training/prefill (when you process the full sequence at once), though during generation each step only adds one row.
+
+### Which Matters More?
+
+At inference time (serving): **KV cache dominates.** This is what you pay for 24/7.
+
+At training time: **The quadratic score matrix dominates.** But you train once and serve forever.
+
+The architectural innovations below address both, but KV cache reduction has been the higher-impact thread for production deployments.
+
+---
+
+## Thread 1: The Head-Sharing Lineage
+
+### Multi-Query Attention ([Shazeer, 2019](https://arxiv.org/abs/1911.02150))
+
+The first big insight was embarrassingly simple. Noam Shazeer (one of the original Transformer paper authors) asked: **what if all query heads share the same K and V?**
+
+In standard multi-head attention, each head $i$ has its own projections:
+
+$$q_i = x W_Q^{(i)}, \quad k_i = x W_K^{(i)}, \quad v_i = x W_V^{(i)}$$
+
+MQA keeps separate query projections but uses a single shared K and V:
+
+$$q_i = x W_Q^{(i)}, \quad k = x W_K, \quad v = x W_V$$
+
+Every query head computes attention against the **same** keys and values.
+
+Step through the full MQA transformation below. Watch how K and V go from 4 separate projections to a single shared one, while Q stays untouched:
+
+<MQAVisualizer />
+
+#### The Memory Savings
+
+With 32 query heads and standard multi-head attention, you cache 32 K matrices and 32 V matrices. With MQA, you cache **1 K and 1 V** — a 32x reduction in KV cache size.
+
+For our earlier example (32K sequence, 80 layers):
+- Standard MHA: 40 GB KV cache
+- MQA: **1.25 GB KV cache**
+
+That's the difference between needing a cluster and fitting on a single GPU.
+
+#### The Quality Cost
+
+MQA doesn't come for free. Sharing KV across all heads means every head sees the same keys and values — they can only differ in what they *query* for. This limits the diversity of attention patterns the model can learn. In practice:
+
+- Decoder-only models tolerate MQA well — most of the "diversity" comes from the query projections anyway
+- Smaller models suffer more quality degradation than larger ones
+- The quality gap is small but measurable on benchmarks
+
+#### Who Used MQA
+
+- **PaLM** (Google, 2022) — 540B parameter model, used MQA throughout
+- **Falcon** (TII, 2023) — 7B/40B/180B models
+- **StarCoder** (BigCode, 2023) — code generation model
+
+MQA proved the concept, but the quality trade-off motivated a middle ground.
+
+### Grouped-Query Attention ([Ainslie et al., 2023](https://arxiv.org/abs/2305.13245))
+
+GQA asks: what if instead of sharing K/V across ALL heads (MQA) or giving every head its own K/V (MHA), we **group** query heads and share K/V within each group?
+
+With $h$ query heads divided into $g$ groups:
+- Each group of $h/g$ query heads shares one K head and one V head
+- When $g = 1$: this is MQA (one shared KV for all)
+- When $g = h$: this is standard MHA (every head has its own KV)
+- In between: $g = 4$ or $g = 8$ gives significant savings with minimal quality loss
+
+Explore the spectrum below — see how query heads get grouped, how K/V is shared within groups, and how the memory savings scale with different group counts:
+
+<GQAVisualizer />
+
+#### The Math
+
+For $h = 32$ query heads with $g = 8$ groups:
+- Each group has 4 query heads sharing 1 K and 1 V head
+- KV cache: $2 \times 8 \times t \times d_k$ (4x smaller than MHA, 8x larger than MQA)
+- Quality: nearly indistinguishable from MHA on most benchmarks
+
+#### Why GQA Won
+
+The paper showed something remarkable: you can take a model trained with MHA and **uptrain it to use GQA** with relatively little compute (5% of original training). This meant existing expensive models could be converted without full retraining.
+
+More importantly, the quality-memory trade-off at $g = 8$ turned out to be nearly Pareto-optimal:
+- MHA: full quality, full memory cost
+- GQA ($g=8$): 99.5% quality, 25% memory cost
+- MQA: 98-99% quality, 3% memory cost
+
+That 0.5% quality difference matters less than the 4x memory savings for most deployments.
+
+#### Who Uses GQA
+
+Nearly everyone, as of 2024-2025:
+- **Llama 2 70B** — the first major adoption (8 KV heads for 64 query heads)
+- **Llama 3 all sizes** — 8B, 70B, and 405B all use GQA
+- **Mistral 7B / Small / Medium** — 8 KV groups
+- **Gemma 1, 2, 3** — all sizes
+- **Qwen 2.5 / Qwen 3** — all sizes
+- **Command-R / R+** (Cohere)
+
+GQA is the de facto standard. If you're building a new LLM in 2025 and don't have a strong reason to do otherwise, you use GQA.
+
+### Cross-Layer Attention ([Brandon et al., MIT CSAIL, 2024](https://arxiv.org/abs/2405.12981))
+
+GQA shares KV across **heads** within a layer. Cross-Layer Attention takes the same idea in a different direction: share KV across **layers**.
+
+The observation: in deep transformers, adjacent layers often compute very similar K and V representations. If layer 12's keys are nearly identical to layer 11's, why compute and cache them separately?
+
+#### The Mechanism
+
+CLA defines a **sharing factor** that determines how many adjacent layers reuse the same KV cache:
+
+- **CLA2** (sharing factor 2): layers 2, 4, 6, ... reuse KV from layers 1, 3, 5, ... → **2× cache reduction**
+- **CLA3** (sharing factor 3): every 3rd layer computes fresh KV, the other 2 reuse it → **3× cache reduction**
+- **CLA4** (sharing factor 4): every 4th layer computes fresh KV → **4× cache reduction**
+
+The implementation is trivial — during forward pass, a layer either computes its own K, V projections normally, or simply indexes into the KV cache of a designated earlier layer. No new parameters, no architectural changes to the attention heads themselves.
+
+#### Why This Fits the Sharing Lineage
+
+Think of it as extending the "sharing" philosophy across a new axis:
+- **MQA**: share KV across all heads (within a layer)
+- **GQA**: share KV across groups of heads (within a layer)
+- **CLA**: share KV across adjacent layers (orthogonal to head sharing)
+
+The key property: CLA is **orthogonal** to head-sharing methods. You can combine GQA + CLA for multiplicative savings: 8× from GQA (4 groups → 8 heads sharing 1 KV set) × 2× from CLA2 = 16× total reduction over MHA.
+
+#### Experimental Results
+
+The paper tests CLA at 1B and 3B parameter scales, training on 100B tokens of RedPajama. The headline finding:
+
+**CLA2 is near-lossless.** At 1B parameters, CLA2 adds only +0.04 perplexity compared to the non-sharing baseline — statistically negligible for a 2× cache reduction. At 3B parameters, CLA2 actually **outperforms** the baseline (lower perplexity), likely because the shared KV acts as a form of regularization at larger scales.
+
+Higher sharing factors degrade more noticeably:
+- CLA3 at 1B: +0.20 perplexity (still usable)
+- CLA4 at 1B: +0.58 perplexity (significant degradation)
+
+The sweet spot is clear: **CLA2 gives you a free 2× reduction**.
+
+#### Composing with MQA and GQA
+
+The paper's most practical finding: **MQA + CLA2** is the recommended configuration. It achieves Pareto-optimal results — better quality-per-memory than either method alone. The combination makes intuitive sense:
+- MQA aggressively compresses within each layer (1 KV head)
+- CLA2 halves the number of layers that need their own cache
+
+At 1B parameters, MQA + CLA2 achieves comparable perplexity to standalone GQA while using less total KV cache memory.
+
+#### Limitations and Current Status
+
+CLA has not been adopted in any major production model as of mid-2025. Several factors explain this:
+
+1. **Scale uncertainty**: all experiments are at 1-3B parameters. Whether CLA2 remains lossless at 70B+ is unverified.
+2. **Training considerations**: the paper notes that higher learning rates improve CLA performance, suggesting the optimization landscape changes — this adds tuning complexity.
+3. **Pipeline parallelism constraint**: if layers sharing KV are split across different devices, the shared cache requires cross-device communication, partially negating the memory savings.
+4. **No serving benchmarks**: the paper reports perplexity but no wall-clock latency or throughput measurements, which matter most in production.
+5. **Competition from MLA**: DeepSeek's MLA (discussed next) achieves even larger compression ratios with proven quality at scale.
+
+Despite this, CLA's simplicity makes it a compelling option for resource-constrained settings. It requires zero new parameters, composes with any head-sharing method, and the implementation is a one-line change in the forward pass. If you're training a model under 10B parameters and want to push KV cache savings beyond GQA alone, CLA2 is the lowest-risk addition.
+
+### Multi-Latent Attention ([DeepSeek-V2, 2024](https://arxiv.org/abs/2405.04434))
+
+Every technique we've seen so far — MQA, GQA, CLA — works by **sharing**. You have one set of keys and values, and multiple consumers look at the same thing. It works, but there's an inherent tension that we should confront directly.
+
+Remember *why* multi-head attention exists in the first place? The whole point of having multiple heads was to let the model learn **diverse** representations — one head tracks syntax, another tracks coreference, another tracks semantic similarity. Multiple heads = multiple perspectives on the same data. That's the fundamental value proposition of MHA.
+
+And then MQA/GQA come along and say: "let's make all those heads look at the *same* keys and values." We added heads for diversity, and then we removed the very thing that makes them diverse. It's like hiring specialists and then giving them all the same briefing document — they can ask different questions, but they're all limited to the same information source.
+
+What if we could approach the problem from a completely different angle?
+
+#### The Motivation: Sharing vs. Compression
+
+Consider what GQA actually sacrifices concretely. When 4 query heads share one K,V pair, those heads must all attend to the *same* information. Head 1 might want to track syntactic structure while head 2 wants semantic similarity — too bad, they're both limited to the same keys. The quality loss from GQA isn't random noise; it's a systematic reduction in the model's ability to represent multiple *types* of relevance simultaneously.
+
+Now here's the key insight from DeepSeek's team: the K and V vectors we're storing are **massively redundant**. In a model with d_model=5120, each token produces a 5120-dimensional K vector. But the actual information content of that vector — the bits that actually matter for attention computation — lives on a much lower-dimensional manifold. Think of it like a 4K image of a blue sky: technically millions of pixels, but almost all of it can be described by "blue, with a slight gradient."
+
+This is the same principle behind PCA, autoencoders, JPEG, and LoRA. High-dimensional representations are compressible because real data has structure.
+
+**The MLA proposal:** instead of storing fewer KV sets (sharing), store *smaller* KV representations (compression). Each head still gets its own unique K and V, but those are reconstructed on-the-fly from a tiny compressed vector.
+
+#### How MLA Works
+
+Instead of caching the full K and V vectors, MLA caches a compressed latent vector $c_t$ for each token:
+
+$$c_t = x_t \cdot W_{\text{down}} \quad \text{(compress: } d_{\text{model}} \rightarrow d_c \text{)}$$
+
+where $d_c \ll d_{\text{model}}$. During attention computation, each head reconstructs its own K and V using head-specific up-projections:
+
+$$k_t^{(h)} = c_t \cdot W_{\text{up}}^{K,h}, \quad v_t^{(h)} = c_t \cdot W_{\text{up}}^{V,h}$$
+
+The per-token KV cache is now just the latent vector $c_t$, which is dramatically smaller. And because each head has its *own* $W_{\text{up}}^{K,h}$, it reconstructs different keys — full per-head diversity from a shared compressed representation.
+
+#### The "Absorbed" Trick: Why Decompression Is Free
+
+The obvious concern: doesn't reconstructing K for every cached token at every step add massive compute? Here's DeepSeek's clever realization. The attention score computation is:
+
+$$\text{score} = q \cdot k^T = q \cdot (c \cdot W_{\text{up}}^K)^T = (q \cdot {W_{\text{up}}^K}^T) \cdot c^T$$
+
+By the associativity of matrix multiplication, you can fold the decompression into the query. Define $q' = q \cdot {W_{\text{up}}^K}^T$ — this is a one-time transform of the current query vector (cheap: one vector, not the entire cache). Then compute scores as $q' \cdot c^T$ — directly between the transformed query and the compressed latents. The full K vector is never materialized. Same trick works for values.
+
+The decompression matrix "absorbs" into the query, making it computationally equivalent to standard attention against a smaller cache.
+
+#### The Numbers
+
+DeepSeek-V2 uses $d_c = 512$ with $d_{\text{model}} = 5120$. That's a 10× compression ratio. Compared to the alternatives:
+
+- **MHA (32 heads)**: stores $2 \times 32 \times 128 = 8192$ values per token
+- **GQA (8 groups)**: stores $2 \times 8 \times 128 = 2048$ values per token
+- **MLA**: stores $d_c = 512$ values per token
+
+**4× better than GQA, 16× better than MHA**, while maintaining per-head diversity that GQA sacrifices. DeepSeek-V2 matches or beats Llama 2 70B quality with 21B active parameters and a fraction of the KV cache.
+
+#### The Trade-offs
+
+MLA isn't free lunch — it trades memory for other constraints:
+
+1. **Low-rank bottleneck**: The compression is lossy. If some critical information lives in dimensions that the compression discards, it's gone. You're betting that $d_c=512$ captures "enough" of what $d_{\text{model}}=5120$ contained.
+2. **RoPE incompatibility**: The absorption trick breaks with standard RoPE. Remember, RoPE applies position-dependent rotations to Q and K *after* projection — but absorption requires folding W_up into Q *before* the dot product. If K has position information baked in, you can't absorb it cleanly. DeepSeek's solution: decouple positional encoding from the compressed latent by adding a small separate "RoPE key" that carries only positional information, while the latent carries content. This adds architectural complexity and a small amount of extra cache (the position keys).
+3. **Implementation complexity**: The absorbed formulation with decoupled RoPE requires custom CUDA kernels. You can't just swap this into a standard attention implementation.
+4. **Parallelism challenges**: GQA maps cleanly onto tensor parallelism (split by groups). MLA's latent doesn't partition as naturally across devices.
+5. **Training cost**: The model must learn good compression/decompression matrices, adding optimization complexity.
+
+But the results speak: DeepSeek-V3 (671B MoE, December 2024) uses MLA and achieved frontier-level performance, validating the approach at massive scale. It's the most aggressive KV cache compression in any production model.
+
+<MLAVisualizer />
+
+<Callout type="info">
+**Want to go deeper?** MLA has more subtleties — the decoupled RoPE design, the joint compression of K and V, and how it interacts with MoE routing. We rebuild the entire architecture from scratch in: [Building DeepSeek-V3 from Ground Up →](/papers/deepseek-v3-from-groundup)
+</Callout>
+
+---
+
+## What Models Actually Use
+
+| Model | Year | KV Strategy | Compression |
+|-------|------|-------------|-------------|
+| GPT-3 | 2020 | Full MHA | None |
+| PaLM | 2022 | MQA | 32× via full sharing |
+| Falcon 40B | 2023 | MQA | 32× via full sharing |
+| Llama 2 70B | 2023 | GQA (8 KV heads) | 4× via grouped sharing |
+| Llama 3 / 3.1 | 2024 | GQA (8 KV heads) | 4× via grouped sharing |
+| DeepSeek-V2 | 2024 | MLA (d_c=512) | 16× via latent compression |
+| Phi-4-mini | 2024 | GQA | 4× via grouped sharing |
+| Qwen 3 | 2025 | GQA | 4× via grouped sharing |
+| DeepSeek-V3 / R1 | 2024-25 | MLA | 16× via latent compression |
+| GLM-5 / 5.1 | 2025 | MLA-256 | ~93% cache reduction |
+| Mistral Large 3 | 2025 | MLA-style | Latent compression + MoE |
+| Zyphra Zaya1-8B | 2025 | CCA (latent space) | 8× via latent compression |
+| Gemma 4 | 2025 | GQA + Shared KV (CLA-like) | Cross-layer reuse in later layers |
+| Llama 4 | 2025 | GQA | 4× via grouped sharing |
+
+### The Pattern
+
+Three tiers have emerged:
+1. **Standard choice** (most models): GQA with 8 groups. Simple, well-understood, good enough. If you're building a new LLM and don't have a strong reason to do otherwise, this is the default.
+2. **Latent compression** (growing fast): MLA and variants (GLM-5, Mistral Large 3, Zyphra). Best cache compression with full per-head diversity. DeepSeek proved it at scale, and others are now following.
+3. **Cross-layer sharing** (emerging): Gemma 4 reuses KV states from earlier layers — the CLA idea we discussed, now validated in a production model.
+
+CLA remains unproven at scale but may appear in future models as a low-risk addition on top of GQA.
+
+---
+
+## The Trade-off Landscape
+
+There's no free lunch. Every approach in the sharing lineage sacrifices something:
+
+**MQA**: Maximum memory savings, but all heads see identical KV — limits pattern diversity. Small quality loss that compounds in reasoning tasks.
+
+**GQA**: Balanced trade-off. Minimal quality loss, significant memory savings. The "safe default" that's hard to beat for general-purpose models.
+
+**CLA**: Free 2× reduction with near-zero quality loss at tested scales (≤3B). Unproven beyond that. Composes well with everything else.
+
+**MLA**: Best compression ratio with full per-head diversity, but complex to implement correctly, requires decoupled RoPE, custom CUDA kernels, and careful training. The reward is 4× better than GQA — if you can pay the engineering cost.
+
+---
+
+## What's Coming Next: Attacking the Quadratic Wall
+
+Everything in this post reduces the **memory** cost of attention — making the KV cache smaller so you can serve longer sequences and bigger batches. But there's a second bottleneck we haven't touched: **compute**.
+
+Even with MLA's compressed cache, the attention computation itself is still $O(n^2)$ in sequence length. Every token still attends to every other token (or at least, every cached latent). At 128K context, that's 16 billion attention score computations per layer.
+
+The next generation of innovations attacks this directly: **what if most tokens don't need to attend to most other tokens?** Sparse attention patterns — sliding windows, global/local hybrids, learned routing — can reduce the quadratic cost to near-linear, without fundamentally changing the attention mechanism.
+
+That's the subject of [Part 3: The Sparsity Lineage](/blog/attention-sparsity) — from Sparse Transformer's fixed patterns (2019) to Mistral's sliding window, Gemma 3's hybrid layers, and DeepSeek's learned Native Sparse Attention.
+
+---
+
+## References
+
+- **[Fast Transformer Decoding: One Write-Head is All You Need](https://arxiv.org/abs/1911.02150)** (Shazeer, 2019) — The MQA paper. Short, elegant, and foundational.
+- **[GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints](https://arxiv.org/abs/2305.13245)** (Ainslie et al., 2023) — The GQA paper, including the uptraining approach.
+- **[DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model](https://arxiv.org/abs/2405.04434)** (DeepSeek, 2024) — Introduces Multi-Latent Attention.
+- **[Reducing Transformer Key-Value Cache Size with Cross-Layer Attention](https://arxiv.org/abs/2405.12981)** (Brandon et al., 2024) — Cross-Layer Attention from MIT CSAIL.
+
+---
+
+*Next in the series: [**Attention Part 3 — The Sparsity Lineage**](/blog/attention-sparsity) — sliding windows, global/local hybrids, differential attention, and learned sparse patterns. How the field made attention sub-quadratic without losing what matters.*
+
+*This post is part of [The Gradient Descent through Transformers](/blog) — a series dissecting every component of the modern transformer stack.*

@@ -5,6 +5,16 @@ import { UnigramVisualizer } from "./UnigramVisualizer";
 import { SentencePieceDemo } from "./SentencePieceDemo";
 import { PEVisualizer } from "./PEVisualizer";
 import { RoPEVisualizer } from "./RoPEVisualizer";
+import { AttentionVisualizer } from "./AttentionVisualizer";
+import { MultiHeadVisualizer } from "./MultiHeadVisualizer";
+import { VideoPlayer } from "./VideoPlayer";
+import { MQAVisualizer } from "./MQAVisualizer";
+import { GQAVisualizer } from "./GQAVisualizer";
+import { MLAVisualizer } from "./MLAVisualizer";
+import { AttentionSparsityVisualizer } from "./AttentionSparsityVisualizer";
+import { TilingVisualizer } from "./TilingVisualizer";
+import { FlashAttentionVisualizer } from "./FlashAttentionVisualizer";
+import { PrePostNormVisualizer } from "./PrePostNormVisualizer";
 
 export const mdxComponents: MDXComponents = {
   Callout,
@@ -13,6 +23,16 @@ export const mdxComponents: MDXComponents = {
   SentencePieceDemo,
   PEVisualizer,
   RoPEVisualizer,
+  AttentionVisualizer,
+  MultiHeadVisualizer,
+  VideoPlayer,
+  MQAVisualizer,
+  GQAVisualizer,
+  MLAVisualizer,
+  AttentionSparsityVisualizer,
+  TilingVisualizer,
+  FlashAttentionVisualizer,
+  PrePostNormVisualizer,
 
   img: (props) => (
     <figure className="my-8">

@@ -1,0 +1,678 @@
+---
+title: "Beyond Attention: Anatomy of a Modern Transformer"
+date: "2026-05-15"
+tags: ["Transformers", "NLP", "Architecture", "FFN", "Normalization", "The Gradient Descent through Transformers"]
+author: "Tanul Singh"
+description: "Every transformer component that isn't attention — FFN layers, normalization, residual connections, embeddings, activations — and how each one evolved from 2017 to 2026. The building blocks that quietly determine whether a model trains at all."
+summary: "Attention gets all the press, but the rest of the transformer matters just as much. This post traces how feed-forward networks, normalization, residual connections, activations, and embeddings evolved from the original 2017 design to the modern LLM recipe — and why seemingly small changes (removing a bias term, swapping an activation function) compound into models that train faster, scale further, and perform better."
+featured: true
+---
+
+*This is Part 8 of **The Gradient Descent through Transformers** — a series where I walk through every component of the modern transformer stack, how it evolved from 2017 to 2026, and why each piece matters.*
+
+*Previously: [Attention Part 4 — Flash Attention](/blog/flash-attention)*
+
+---
+
+## The Unglamorous Half
+
+We've spent four posts on attention — the mechanism, the sharing lineage, the sparsity lineage, the systems optimization. Attention is the star of the transformer. It's in the paper title. It gets the blog posts, the Twitter threads, the research funding.
+
+But attention is only half the transformer.
+
+Look at a single transformer layer:
+
+```
+Input
+  ↓
+  ├──→ [Layer Norm] → [Multi-Head Attention] ──→ (+)    ← Residual Connection
+  ↓                                                ↓
+  ├──→ [Layer Norm] → [Feed-Forward Network]  ──→ (+)    ← Residual Connection
+  ↓
+Output
+```
+
+We've covered attention exhaustively. Everything else in this diagram — the normalization layers, the feed-forward network, the residual connections, the activation function hidden inside the FFN — we haven't touched. And beyond the individual layer, there are architectural decisions that shape the whole model: how tokens enter (embeddings), how predictions come out (output projection), whether those two share weights, what happens to logits before softmax, and even how many tokens to predict at once.
+
+These components do the quiet, unglamorous work of actually making the model trainable, stable, and expressive. And they've changed *dramatically* since 2017, often in ways that matter more for practical performance than any attention variant.
+
+Here's the thing: you can swap Multi-Head Attention for GQA or MLA and get a 2× KV cache reduction. Nice. But if you get normalization wrong, the model doesn't train at all. If you pick the wrong activation function, you leave 1-2 perplexity points on the table across the entire training run. If you don't tie or untie your embeddings correctly at scale, you waste hundreds of millions of parameters.
+
+In this post, we'll walk through every non-attention component:
+
+- **Feed-Forward Networks** — from two linear layers + ReLU to gated architectures (SwiGLU)
+- **Activation Functions** — the ReLU → GELU → SiLU → SwiGLU progression
+- **Normalization** — LayerNorm vs RMSNorm, and the pre-norm vs post-norm debate that quietly changed everything
+- **Residual Connections** — the gradient highway that makes deep transformers trainable at all
+- **Embeddings & Output Layer** — weight tying, vocabulary growth, and how the model's entry and exit points evolved
+- **Logit Soft-Capping** — a simple trick for training stability
+- **Multi-Token Prediction** — predicting more than one token at a time
+- **Decoder-Only vs Encoder-Decoder** — how one architecture won
+- And the **small but important changes** that collectively reshape the modern transformer: bias removal, dropout removal
+
+By the end, we'll assemble the **Standard Modern LLM Recipe** — the exact configuration that every frontier model in 2026 converges on.
+
+---
+
+## The Feed-Forward Network (FFN)
+
+Every transformer layer has two sublayers: attention and a feed-forward network (FFN). Attention lets tokens talk to each other. The FFN processes each token independently — it's where the model does its "thinking" per position.
+
+But before we look at how the FFN evolved, a more fundamental question: **why does the FFN exist at all?**
+
+### Why Can't We Just Stack Attention Layers?
+
+Attention is a **mixing** operation, not a transformation. It computes a weighted average of value vectors — it takes existing representations and blends them together. The softmax makes it nonlinear in *which* tokens to attend to, but the output is still a linear combination of V vectors. A weighted average can't create new features that aren't already present in the input.
+
+If you stacked 60 attention layers with no FFN:
+- Layer 1: weighted average of input embeddings
+- Layer 2: weighted average of those weighted averages
+- Layer 3: weighted average of weighted averages of weighted averages
+- ...
+
+You'd be mixing the same initial features over and over. The representations get blended across positions, but **no new features are ever computed**. The model can decide what information to route where, but it can't *transform* that information into something new.
+
+The FFN is where new features are created. It applies a nonlinear transformation to each token independently — that nonlinearity (SwiGLU, GELU, whatever) is what lets the model compute representations that didn't exist in the input. Things like higher-level abstractions ("this phrase is negative"), compositional features ("verb in past tense following a negation"), and factual knowledge.
+
+Research confirms this: [Dai et al. (2022, *"Knowledge Neurons in Pretrained Transformers"*)](https://arxiv.org/abs/2104.08696) showed that factual knowledge like "Paris is the capital of France" is stored in the **FFN weights**, not the attention weights. Attention routes the query to the right context; the FFN retrieves and transforms the answer. The FFN layers contain most of the model's memorized facts, patterns, and associations.
+
+**Think of it this way**: attention is a *meeting* — people share information with each other. The FFN is *individual work* — each person goes back to their desk and thinks about what they heard. If you only have meetings with no individual work, nothing new gets produced. If you only have individual work with no meetings, people work in isolation. You need both.
+
+### The Original: Two Linear Layers + ReLU (2017)
+
+The original transformer's FFN is simple:
+
+$$\text{FFN}(x) = \text{ReLU}(xW_1 + b_1)W_2 + b_2$$
+
+Two linear transformations with a ReLU activation between them. The input $x$ has dimension $d_{\text{model}}$, the hidden layer expands to $d_{ff} = 4 \times d_{\text{model}}$ (4x expansion), and the output projects back to $d_{\text{model}}$.
+
+For the original transformer with $d_{\text{model}} = 512$: the hidden dimension was $d_{ff} = 2048$. Each FFN layer has $2 \times d_{\text{model}} \times d_{ff}$ parameters (two weight matrices + biases).
+
+The FFN is applied **identically and independently** to each token position. Token 5 and token 500 go through the exact same weights — no cross-token interaction. That's attention's job.
+
+**Why 4x expansion?** The expansion-then-compression creates a bottleneck architecture. The expansion to $4 \times d_{\text{model}}$ gives the network a higher-dimensional space to perform nonlinear transformations, and the compression back to $d_{\text{model}}$ forces it to distill that into a compact representation. Think of it as: attention decides *what* information each token should carry; the FFN decides *how* to transform that information.
+
+But notice that word — "nonlinear." The transformation between the two linear layers is where the magic happens. That's the activation function. And which activation function you choose turns out to matter a lot.
+
+### Activation Functions: The Progression
+
+The original transformer used **ReLU** between its two linear layers. Since then, the field has gone through three generations of activation functions, each a modest but consistent improvement.
+
+#### ReLU (2017)
+
+$$\text{ReLU}(x) = \max(0, x)$$
+
+Simple, fast, well-understood from the CNN era. But it has one well-known problem: **dead neurons**. Once a neuron's pre-activation goes negative, the gradient is exactly zero. If this happens consistently, the neuron never recovers — it's permanently dead. In large models, a meaningful fraction of neurons can die during training.
+
+#### GELU (2018-2020)
+
+$$\text{GELU}(x) = x \cdot \Phi(x)$$
+
+where $\Phi$ is the standard normal CDF (approximated in practice as $0.5x(1 + \tanh(\sqrt{2/\pi}(x + 0.044715x^3)))$).
+
+GELU takes a fundamentally different approach from ReLU's hard binary decision. Instead of "positive = keep, negative = zero," GELU asks: **compared to the typical values this neuron sees, how large is this particular input?**
+
+Why is that the right question? In a neural network, the inputs to each activation function are sums of many small contributions (weights × activations from the previous layer). By the central limit theorem, these sums tend to be roughly normally distributed. So GELU uses $\Phi(x)$ — the CDF of the standard normal distribution — as a measure of "how extreme is this value?" and scales the input by that:
+
+- $x = 3$: 3 standard deviations above the mean. $\Phi(3) = 0.999$. This value is bigger than 99.9% of typical inputs → output is $3 \times 0.999 \approx 2.997$. Almost fully kept.
+- $x = -3$: 3 standard deviations below. $\Phi(-3) = 0.001$. Smaller than 99.9% of typical inputs → output is $-3 \times 0.001 \approx -0.003$. Almost fully zeroed.
+- $x = 0$: Right at the mean. $\Phi(0) = 0.5$. Exactly average → output is $0 \times 0.5 = 0$.
+- $x = -0.5$: Slightly below average. $\Phi(-0.5) = 0.31$ → output is $-0.5 \times 0.31 = -0.155$. Small, but not zero — **ReLU would have killed this completely**.
+
+There's also an elegant probabilistic interpretation: imagine instead of deterministically scaling by $\Phi(x)$, you flipped a biased coin — heads with probability $\Phi(x)$, tails otherwise. Heads = keep the value, tails = zero it. If you averaged the result over many coin flips, you'd get exactly $x \times \Phi(x)$ — which is GELU. So GELU is the expected value of a "stochastic ReLU" where the keep-or-kill probability depends on how the value compares to the neuron's typical input distribution.
+
+**In short**: ReLU says "positive = important, negative = trash." GELU says "let me check how this value compares to what this neuron typically sees, and scale it proportionally." It's a softer, more nuanced gate — and the smooth gradient everywhere (no hard cliff at $x = 0$) gives the optimizer smoother loss landscapes and more stable training.
+
+**Adopted by**: BERT (2018), GPT-2 (2019), GPT-3 (2020). GELU became the default for NLP transformers.
+
+#### SiLU / Swish (2017, adopted ~2022+)
+
+$$\text{SiLU}(x) = x \cdot \sigma(x) = x \cdot \frac{1}{1 + e^{-x}}$$
+
+Also called "Swish" — same function, discovered independently by multiple groups. SiLU is structurally identical to GELU in concept — multiply the input by a soft gate — but uses the **sigmoid function** as the gate instead of the normal CDF.
+
+**But wait — sigmoid was the activation function everyone abandoned.** Before ReLU (pre-2012), networks used sigmoid directly as the activation: $\text{output} = \sigma(x)$. The problem was severe: sigmoid is bounded between 0 and 1. An input of 5 and an input of 100 both produce approximately 1. All magnitude information is destroyed. The function saturates — goes flat on both ends — and in those flat regions, the gradient is nearly zero. This is the **vanishing gradient problem** that plagued deep learning for years.
+
+So how is SiLU different from just using sigmoid? The multiplication by $x$ changes everything:
+
+```
+                Sigmoid alone           SiLU = x × sigmoid(x)
+x = 1:          σ(1) = 0.73            1 × 0.73   =  0.73
+x = 5:          σ(5) = 0.99            5 × 0.99   =  4.95
+x = 100:        σ(100) = 1.00          100 × 1.00 =  100
+x = -1:         σ(-1) = 0.27           -1 × 0.27  = -0.27
+x = -5:         σ(-5) = 0.01           -5 × 0.01  = -0.03
+```
+
+Sigmoid alone squashes everything into $[0, 1]$ — inputs of 5 and 100 become indistinguishable. SiLU is **unbounded for positive values** — it grows linearly, just like ReLU. Large inputs produce large outputs. No saturation, no vanishing gradients. By multiplying by $x$, the sigmoid stops being the output and becomes a **soft gate** that controls how much of the original value $x$ passes through.
+
+SiLU gets the best of both worlds:
+- **ReLU's property**: linear growth for large positive values (preserves magnitude, strong gradients)
+- **Sigmoid's property**: smooth, differentiable transition near zero (no hard cliff)
+
+There's one more thing. Look at the table again — $x = -1$ gives output $-0.27$, but $x = -5$ gives $-0.03$. The output went *more* negative, then came back toward zero. This is the **non-monotonic dip**: slightly negative inputs produce a small negative output, but very negative inputs are suppressed toward zero. Why does this help?
+
+1. **Gradient signal survives** for moderately negative values. Unlike ReLU which kills them completely, SiLU lets the network learn from these inputs.
+2. **The negative bump acts like implicit regularization** — the network can represent "this feature is weakly *against* this concept" rather than just "this feature is off."
+3. **Very negative values still get suppressed**, so the function still gates out clearly irrelevant features.
+
+In practice, SiLU and GELU perform very similarly. SiLU is slightly simpler to compute (sigmoid is cheaper than the normal CDF approximation). The real reason SiLU won is that it's the activation used inside **SwiGLU** — and SwiGLU won the FFN architecture race, as we'll see next.
+
+**The progression so far**: ReLU (2017) → GELU (2018-2020) → SiLU (2022+). Each step was a modest but consistent improvement — smoother gradients, fewer dead neurons, slightly better perplexity. But the really big jump came not from swapping the activation function, but from changing the FFN architecture itself.
+
+### The Gated Revolution: GLU and SwiGLU
+
+We've improved the activation function three times — ReLU → GELU → SiLU — and each time got a modest improvement. But all three share a fundamental limitation: **they make decisions based on each value in isolation.**
+
+When ReLU sees a value of $-0.3$, it zeros it. When SiLU sees $-0.3$, it scales it down. Neither one considers *what the other values in the same representation look like*. Maybe $-0.3$ in dimension 47 is critically important when dimension 12 is large — but the activation function has no way to know that. It processes each dimension independently with the same fixed nonlinearity.
+
+**What if the network could learn which dimensions to keep and which to suppress, based on the full input?**
+
+This is the idea behind **gating**, and it's not new. LSTMs (Hochreiter & Schmidhuber, 1997) introduced learnable gates to control information flow in recurrent networks — a forget gate, an input gate, and an output gate. Each gate is a sigmoid over the full input, producing per-dimension keep-or-kill decisions that are *input-dependent* and *context-aware*. Gates were the key innovation that made RNNs actually work on long sequences.
+
+The insight that Dauphin et al. (2017) had was: **why not apply the same idea to feed-forward layers?** Instead of processing the hidden representation through a single activation function, split the computation into two parallel paths:
+
+1. **Content path**: a linear projection of the input ($xW_1$) — "here's what I *could* say"
+2. **Gate path**: a different linear projection passed through sigmoid ($\sigma(xV)$) — "here's how much of each dimension I *should* say"
+
+Then multiply them element-wise:
+
+$$\text{GLU}(x) = (xW_1) \odot \sigma(xV)$$
+
+This is the **Gated Linear Unit (GLU)**. The gate sees the full input $x$ and learns a per-dimension filtering decision. Dimension 47 might get a gate value of 0.95 (keep it) while dimension 12 gets 0.02 (suppress it) — and these decisions depend on the *entire* input vector, not just the individual dimension values.
+
+**Why is this more powerful than a pointwise activation?** Consider what a standard FFN does:
+
+```
+Standard:  output = activation(x @ W1) @ W2
+           └── one transformation, one fixed nonlinearity
+```
+
+Every dimension goes through the same activation function with the same behavior. The network's only expressive tool is the nonlinearity's fixed shape.
+
+```
+Gated:     output = (activation(x @ W1) ⊙ (x @ V)) @ W2
+           └── two different transformations, multiplied together
+```
+
+The gate path ($x @ V$) and the content path ($x @ W1$) are *different* learned projections of the same input. Their element-wise multiplication creates **multiplicative interactions** — the output at each dimension is a product of two different learned functions of the input. This is a strictly richer function space than applying a single pointwise nonlinearity.
+
+In 2020, Noam Shazeer (one of the original transformer authors) published [*"GLU Variants Improve Transformer"*](https://arxiv.org/abs/2002.05202), systematically testing what happens when you swap the sigmoid gate for the activation functions we just learned about:
+
+- **ReGLU**: gate uses ReLU
+- **GeGLU**: gate uses GELU
+- **SwiGLU**: gate uses SiLU/Swish ($x \cdot \sigma(x)$)
+
+The full SwiGLU FFN becomes:
+
+$$\text{SwiGLU}(x) = (\text{SiLU}(xW_1) \odot xV) W_2$$
+
+Notice: there are now **three** weight matrices ($W_1$, $V$, $W_2$) instead of two. This adds 50% more parameters for the same hidden dimension.
+
+### The Hidden Dimension Adjustment
+
+To keep the total parameter count roughly equal when switching from standard FFN to SwiGLU, you have to shrink the hidden dimension:
+
+- **Standard FFN**: 2 matrices × $d_{\text{model}} \times d_{ff}$ = $2 \times d \times 4d$ = $8d^2$ parameters
+- **SwiGLU**: 3 matrices × $d_{\text{model}} \times d_{ff}$ = $3 \times d \times d_{ff}$ parameters
+
+Setting $3 \times d \times d_{ff} = 8d^2$ gives $d_{ff} = \frac{8}{3}d \approx 2.67d$.
+
+In practice, this is rounded to a hardware-friendly number. LLaMA uses $d_{ff} \approx 2.69 \times d_{\text{model}}$ (e.g., $d_{\text{model}} = 4096 \rightarrow d_{ff} = 11008$).
+
+**The result**: same parameter budget, same compute cost, consistently better perplexity. Shazeer's paper showed SwiGLU outperforming all non-gated variants across multiple benchmarks — often by 0.5-1.0 perplexity points. That's a significant free improvement.
+
+### Activation Clamping (2026)
+
+DeepSeek-V4 introduced a small but practical addition: **clamping the SwiGLU output** to prevent extreme values.
+
+$$\text{SwiGLU\_clamped}(x) = \text{clamp}(\text{SwiGLU}(x), -L, L)$$
+
+With $L = 10.0$. This prevents rare activation explosions during training at extreme scale (1.6T parameters), especially when combined with FP8/FP4 mixed-precision training where large values can cause overflow. It's cheap insurance — the clamp almost never activates during normal operation, but catches the rare catastrophic outlier.
+
+### Who Uses What (2026)
+
+| Model | FFN Type | Hidden Dim Ratio |
+|-------|----------|-------------------|
+| Original Transformer (2017) | ReLU FFN | 4x |
+| GPT-2/3 (2019-2020) | GELU FFN | 4x |
+| PaLM (2022) | SwiGLU | ~8/3x |
+| LLaMA 1/2/3 (2023-2024) | SwiGLU | ~8/3x |
+| Gemma 2/4 (2024-2026) | GeGLU | ~8/3x |
+| Mistral / Mixtral (2023-2024) | SwiGLU | ~8/3x |
+| Qwen 2.5/3/3.5 (2024-2026) | SwiGLU | ~8/3x |
+| DeepSeek-V3/V4 (2024-2026) | SwiGLU | ~8/3x |
+
+**The verdict**: SwiGLU won. Every frontier model in 2026 uses either SwiGLU or GeGLU. The standard ReLU FFN is extinct in large-scale LLMs.
+
+---
+
+## Normalization: The Training Stabilizer
+
+### The Problem: Why Deep Networks Need Normalization
+
+Without normalization, deep networks suffer from several interconnected problems that make training fragile or impossible. Let's walk through each one.
+
+**1. Activation explosion/vanishing.** Each transformer layer is a function that transforms its input. If a layer tends to slightly increase the magnitude of its input — say by a factor of 1.1 on average — then after 60 layers:
+
+$$\text{magnitude} \approx 1.1^{60} \approx 304$$
+
+Your activations have exploded 300×. Gradients face the same compounding in reverse during backpropagation. In practice, loss goes to NaN and training dies.
+
+**2. Feature dominance.** Imagine layer $L$ produces a representation where dimension 12 has magnitude ~500 and dimension 47 has magnitude ~0.01. During backpropagation, the gradient with respect to a weight is proportional to the input activation flowing through it. Large activations produce large gradients. So the network rapidly adjusts weights connected to the large feature (loud gradient signal) and barely touches weights connected to the small feature (whisper-quiet gradient). Over training steps, the large feature becomes even more dominant — its weights get tuned first, the network learns to rely on it — while the small feature becomes irrelevant, even if it carries critical information.
+
+This creates an elongated, elliptical loss landscape: the loss is very sensitive along the "large feature" direction (steep walls) and barely sensitive along the "small feature" direction (flat valley). Gradient descent zigzags across the steep dimension instead of making progress along the flat one.
+
+**3. Layers are tightly coupled (internal covariate shift).** In each training step, we do a forward pass, compute all gradients via backprop, then update all weights simultaneously. The problem appears on the *next* step: layer 5's gradient was computed assuming a certain input distribution (determined by layers 1-4's weights during the forward pass). But layers 1-4 *also* updated their weights in that same step. So on the next forward pass, layer 5's input distribution has shifted — the gradient it applied was computed for a distribution that no longer exists. It's chasing a moving target.
+
+The deeper the network, the worse this gets. Layer 50's input depends on layers 1-49, all of which updated simultaneously. The original BatchNorm paper (Ioffe & Szegedy, 2015) called this **internal covariate shift** — from any layer's perspective, its input distribution keeps changing between steps because the layers before it are updating.
+
+(Interestingly, [Santurkar et al. (2018)](https://arxiv.org/abs/1805.11604) later showed that normalization doesn't actually reduce internal covariate shift much — they measured it, and the distributions still shift even with normalization. The real benefit turns out to be **loss landscape smoothing**. What does that mean concretely? Without normalization, the loss landscape is jagged and unpredictable — you compute a gradient, take a step in that direction, and the loss might spike up because the terrain changed abruptly. With normalization, the landscape becomes smoother: if a step in some direction decreases the loss, another step in that direction will *probably* also decrease it. The gradient at your current position is actually informative about what nearby positions look like. This means larger learning rates are safe (you can take bigger steps without falling off a cliff), momentum works better (the gradient direction stays consistent across steps), and training converges faster. The coupling/shift framing remains a useful intuition for *why* unnormalized networks are fragile, but the mechanistic explanation is geometric: normalization tames the landscape.)
+
+**4. Learning rate fragility.** All of the above means the optimal learning rate is incredibly sensitive — it depends on activation magnitudes, which depend on initialization, data scale, depth, and where you are in training. Too large and the "loud" features diverge. Too small and the "quiet" features never learn. The sweet spot is narrow and moves over time.
+
+**The fix: normalization.** After each sublayer, compute the mean and standard deviation of the activation vector, subtract the mean, and divide by the standard deviation. Let's trace through how this addresses each problem:
+
+**How it prevents explosion/vanishing:** If layer 3 amplifies its output by 100×, the standard deviation of that output is now ~100× larger. Dividing by the standard deviation brings it right back to unit scale. It doesn't matter what layer 3 did — the normalization computes the *current* statistics and normalizes them away. The magnitude is reset to ~1 at every layer, making it impossible for the 1.1^60 compounding to happen.
+
+**How it gives every feature a fair vote:** If dimension 12 has magnitude 500 and dimension 47 has magnitude 0.01, after normalization both are on comparable scales (~1). Gradients flowing backward through these features are now proportional to the normalized values, not the raw magnitudes. The "loud" feature can no longer drown out the "quiet" one. The loss landscape becomes more spherical — roughly equal sensitivity in all directions — so gradient descent can take a direct path instead of zigzagging.
+
+**How it decouples layers:** No matter what layer 3 outputs — scaled by 100×, shifted by a huge bias, completely different distribution from last step — the normalization computes the new mean and standard deviation of *that specific output* and normalizes it back to zero mean, unit variance. Layer 4 always sees a well-behaved input regardless of what happened before it. The normalization absorbs the scale and shift, acting as a firewall between layers.
+
+But wait — doesn't normalization have learned parameters γ and β that can scale and shift the output? And don't those change every training step too? Yes. The coupling isn't *eliminated* — it's **tamed**. Here's the difference:
+
+- **Without normalization**: layer 4's input depends on the complex, nonlinear interaction of *all* weight matrices in layers 1, 2, and 3. Thousands of parameters across multiple layers can shift the distribution in dramatic, unpredictable ways. The coupling is multiplicative and high-dimensional.
+- **With normalization**: the normalization erases whatever layers 1-3 did to the scale and shift. Then γ and β impose a *new* scale and shift. Layer 4's input distribution depends only on these simple per-dimension parameters — not on the complex cascade of preceding weights.
+
+And γ/β are fundamentally different from layer weights: they're one scalar per dimension, doing only a linear affine transform, initialized at γ=1, β=0, and they change slowly during training. Full weight matrices perform high-dimensional nonlinear transformations whose effect on the output distribution is dramatic and hard to predict. Normalization converts "layer 4's input is shaped by the arbitrary, nonlinear effects of all preceding layers' weight matrices" into "layer 4's input is shaped by a simple, slow-moving, per-dimension scale and shift." That's manageable for the optimizer.
+
+**How it smooths the landscape:** By keeping activations in a consistent range at every layer, the gradients flowing backward also stay in a consistent range. The gradient you compute at your current position remains approximately valid for a neighborhood around you (the loss doesn't spike unpredictably). This means you can take larger optimization steps without diverging — effectively, normalization widens the range of learning rates that work.
+
+### Batch Normalization vs Layer Normalization
+
+We need normalization — but which dimension do we normalize across? This choice defines two fundamentally different approaches.
+
+**Batch Normalization** (Ioffe & Szegedy, 2015) revolutionized CNN training. It normalizes across the **batch dimension** — for each feature, it asks: "what's the average value of this feature across all examples in this batch?"
+
+```
+Input shape: [batch_size, seq_len, d_model]
+BatchNorm: normalize across batch_size (for each feature independently)
+           → "How does feature #47 behave across all sequences?"
+```
+
+**Layer Normalization** (Ba et al., 2016) takes the orthogonal approach: normalize across the **feature dimension** — for each token independently, it asks: "how does this token's internal representation look?"
+
+```
+Input shape: [batch_size, seq_len, d_model]
+LayerNorm: normalize across d_model (for each token independently)
+           → "How do the 4096 features of this specific token relate to each other?"
+```
+
+Both achieve the same goal — keeping activations in a stable range. But they compute their statistics from completely different slices of the tensor. And for transformers, this difference is decisive.
+
+**Why LayerNorm wins for transformers:**
+
+1. **Variable sequence lengths.** Sequences in a batch have different lengths. BatchNorm averages statistics across sequences, mixing padding tokens with real tokens — the resulting mean and variance are meaningless. LayerNorm operates on each token independently, so padding is irrelevant.
+
+2. **Position-dependent representations.** The token at position 0 has fundamentally different statistics than the token at position 1000 (it's seen nothing vs everything). BatchNorm averages these together, destroying position-specific information. LayerNorm doesn't care — each token normalizes only itself.
+
+3. **Batch size dependency.** BatchNorm needs large batches to compute stable statistics. With batch size 1 at inference, you must rely on running averages — which can be inaccurate. LayerNorm computes statistics from a single token's features ($d = 4096$ values) — always plenty of data, always exact, no stored running averages needed.
+
+4. **Distributed training.** BatchNorm requires synchronizing batch statistics across GPUs — expensive communication overhead at scale. LayerNorm is entirely local to each token.
+
+5. **It normalizes where the action is.** Every computation in a transformer — attention projections, FFN transformations, output projections — operates on the feature dimension ($d_\text{model}$). That's where activations grow, shrink, and drift. LayerNorm directly tames the dimension that's being transformed. BatchNorm normalizes across the batch — a dimension that's just an artifact of parallel training, not where any computation happens.
+
+### LayerNorm in Detail
+
+For a single token with representation $x = [x_1, x_2, \ldots, x_d]$:
+
+$$\mu = \frac{1}{d}\sum_{i=1}^{d} x_i, \quad \sigma^2 = \frac{1}{d}\sum_{i=1}^{d}(x_i - \mu)^2$$
+
+$$\text{LayerNorm}(x) = \gamma \odot \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} + \beta$$
+
+where $\gamma$ (scale) and $\beta$ (bias) are learned parameters of size $d$.
+
+**What it does, step by step:**
+1. **Subtract the mean** ($x - \mu$) — re-centers the representation to zero mean across features. Removes any global bias that accumulated.
+2. **Divide by standard deviation** ($/ \sqrt{\sigma^2 + \epsilon}$) — normalizes to unit variance. Now all tokens have representations with comparable magnitudes, regardless of what the previous layer did.
+3. **Apply learned scale and shift** ($\gamma$ and $\beta$) — after forcing the statistics to (0, 1), let the model learn what the optimal scale and offset are for each feature.
+
+**Why the learned parameters?** Without $\gamma$ and $\beta$, you'd force every token to have exactly zero mean and unit variance — too restrictive. The network might *want* dimension 47 to be consistently larger. The learned parameters let the network choose the final statistics per feature, while the normalization step guarantees that the *input* to each layer has predictable statistics regardless of depth. The normalization handles the *optimization* problem (stable gradients, decoupled layers); the learned parameters handle the *expressivity* problem (the model can still represent any scale it needs).
+
+### RMSNorm: Simpler Is Better (2019+)
+
+[Zhang & Sennrich (2019)](https://arxiv.org/abs/1910.07467) asked: does Layer Normalization really need the mean subtraction? Their answer was no.
+
+$$\text{RMSNorm}(x) = \gamma \odot \frac{x}{\sqrt{\text{mean}(x^2) + \epsilon}}$$
+
+Two key differences from LayerNorm:
+1. **No mean subtraction** — only divides by the root mean square (RMS) of the values
+2. **No bias parameter** $\beta$ — only the scale parameter $\gamma$
+
+**Why it works just as well**: Think about what the two operations in LayerNorm actually fix. The *division by standard deviation* fixes the magnitude problem — it prevents activations from exploding or vanishing across layers, which is the thing that actually breaks training. The *mean subtraction* fixes a centering problem — it removes a global offset from the feature vector. But that offset is harmless: the next layer's weight matrix can trivially learn to account for any constant shift (it's just absorbed into the bias terms or the learned $\gamma$/$\beta$ of subsequent layers). A vector $[5, 7, 3]$ and a shifted vector $[0, 2, -2]$ carry the same information — the relative structure is identical, the absolute position doesn't matter. So mean subtraction was solving a problem that wasn't causing training instability in the first place. What *was* causing instability — the magnitude growing unchecked — is fully handled by the RMS division alone.
+
+**Why it's preferred**: RMSNorm is computationally simpler. It avoids computing the mean for subtraction, which saves one reduction operation per normalization. In practice, this translates to ~10-15% faster normalization with no quality loss.
+
+**Who uses RMSNorm**: Essentially every modern LLM (2023+) — LLaMA, PaLM, Mistral, Gemma, Qwen, DeepSeek. LayerNorm in the original form is extinct in frontier models.
+
+### Zero-Centered LayerNorm (2025)
+
+Qwen3-Next introduced a twist: **zero-centered LayerNorm with weight decay**. Instead of using RMSNorm, they use a modified LayerNorm but with weight decay applied to the normalization parameters. The motivation is training stability — by decaying the scale parameters toward smaller values, the normalization exerts stronger control over activation magnitudes, preventing the gradual drift that can destabilize very deep or very sparse models.
+
+This is notable because it bucks the RMSNorm trend. The Qwen team found that for their hybrid architecture (mixing Gated DeltaNet with standard attention), the extra regularization from weight-decayed LayerNorm outweighed the computational savings of RMSNorm.
+
+### Pre-Norm vs Post-Norm: Where You Normalize Matters
+
+This is one of the most impactful and least appreciated changes in transformer history.
+
+**Post-Norm (Original Transformer, 2017):** $\text{output} = \text{Norm}(x + f(x))$ — the Norm wraps around the entire sum including the residual.
+
+**Pre-Norm (GPT-2 onward, 2019+):** $\text{output} = x + f(\text{Norm}(x))$ — the Norm is inside the branch only. The residual $x$ is added directly, untouched.
+
+At first glance these look similar. The difference becomes dramatic when you stack layers — the visualizer below shows why:
+
+<PrePostNormVisualizer />
+
+[Xiong et al. (2020)](https://arxiv.org/abs/2002.04745) formally analyzed this and showed Pre-Norm removes the learning rate warmup requirement entirely. Pre-norm dramatically improves training stability, allows training deeper models, and makes hyperparameter tuning less fragile.
+
+**The tradeoff**: Some research suggests Post-Norm can achieve slightly better final performance *if* you can get it to train stably, because the normalization constrains the representation more tightly. But this marginal quality gain isn't worth the training instability in practice.
+
+**Modern status**: Pre-Norm is universal. Every frontier model since GPT-2 uses it.
+
+### The Final Norm
+
+There's one subtle consequence of Pre-Norm: the output of the last transformer layer is **un-normalized**. In Post-Norm, each layer's output passes through normalization, so the final output is automatically normalized. In Pre-Norm, normalization happens *before* each sublayer, meaning the last sublayer's output goes directly into the residual stream without normalization.
+
+The fix: add a **final RMSNorm** after the last transformer layer, before the output projection head. This ensures the representations fed to the output layer have a well-behaved scale.
+
+Every Pre-Norm model includes this final normalization. It's easy to overlook but essential — without it, the output logits can be poorly scaled, hurting training.
+
+---
+
+## Residual Connections: The Gradient Highway
+
+Residual connections are arguably the most important architectural choice in the transformer. Without them, deep transformers (>6 layers) are essentially untrainable.
+
+### What They Do
+
+Every transformer sublayer (attention and FFN) has a residual connection:
+
+$$\text{output} = x + \text{Sublayer}(x)$$
+
+The input $x$ is added directly to the sublayer's output. This means the sublayer only needs to learn the **residual** — the difference between the desired output and the input — rather than the entire transformation.
+
+### Why They Work
+
+**Gradient highway**: The gradient through a residual connection is:
+
+$$\frac{\partial \text{output}}{\partial x} = I + \frac{\partial \text{Sublayer}(x)}{\partial x}$$
+
+The identity matrix $I$ guarantees that gradients flow backward with magnitude at least 1, regardless of what the sublayer does. Even if the sublayer's Jacobian is near zero (vanishing gradients), the skip connection ensures the gradient signal survives.
+
+In a 60-layer transformer without residual connections, the gradient would pass through 60 matrix multiplications — vanishing or exploding exponentially. With residual connections, there's a direct path from the output to any layer.
+
+**Ensemble interpretation**: [Veit et al. (2016)](https://arxiv.org/abs/1605.06431) showed that residual networks can be viewed as an implicit ensemble of many paths of different lengths. Not all layers need to contribute to every input — some can effectively be "skipped" via the residual path. This creates redundancy and robustness.
+
+### Pre-Norm Residual: The Clean Path
+
+As discussed in the normalization section, the pre-norm configuration creates the cleanest residual path:
+
+```python
+# Pre-norm residual (modern)
+h = RMSNorm(x)
+h = Attention(h)    # or FFN(h)
+output = x + h      # clean addition — x flows unmodified
+```
+
+The residual stream is never passed through normalization, activation functions, or any other nonlinearity. It's a pure additive highway from the first layer to the last. This is the configuration every modern LLM uses.
+
+### Depth-Scaled Initialization
+
+There's a subtle problem with residual connections. Each layer does `output = x + f(x)`, where `f(x)` is the sublayer output. At initialization, `f(x)` is some random small vector — but even "small" adds up. If you have 96 layers (192 sublayers counting both attention and FFN), the residual stream accumulates 192 random contributions. Variance grows linearly:
+
+$$\text{Var}(\text{residual at layer } N) \approx \text{Var}(\text{input}) + 2N \cdot \text{Var}(f(x))$$
+
+By the last layer of a 96-layer model, activations are $\sqrt{192} \approx 14\times$ larger in magnitude than at layer 1. This creates two problems:
+- Gradients become imbalanced — early layers see disproportionately large gradients relative to later ones
+- The model starts training in a badly conditioned state where the loss landscape is steep in some directions and flat in others
+
+**The fix**: multiply each sublayer's output projection by $\frac{1}{\sqrt{2N}}$ at initialization:
+
+```
+output = x + (1/√2N) * f(x)
+```
+
+Now each sublayer contributes $\frac{1}{2N}$ of the normal variance. After all $2N$ sublayers add up, total accumulated variance is $2N \times \frac{1}{2N} = 1$ — the residual stream stays at constant scale regardless of depth.
+
+**What this means at initialization**: the model is *almost* an identity function. Each layer barely perturbs the input — the signal flows through essentially unchanged. Training then gradually "turns on" each layer's contribution as the weights grow. This makes the initial optimization landscape smooth and well-conditioned, because you start near a simple function (identity) and incrementally add complexity.
+
+Most modern models use some variant — either explicit scaling of output projection weights, or initializing them to small values that achieve the same effect.
+
+### Hyper-Connections: The First Replacement (2026)
+
+For eight years, the standard residual connection ($x + f(x)$) went unchanged in production models. DeepSeek-V4 (April 2026) is the first frontier model to replace it.
+
+**Manifold-Constrained Hyper-Connections (mHC)** replace the simple addition with a learned, constrained connection between layers. The exact formulation involves Sinkhorn normalization (iterative doubly-stochastic projection) to ensure the connection weights satisfy certain manifold constraints.
+
+The motivation: at extreme scale (1.6T parameters, 61 layers), the simple additive residual may not be the optimal way to propagate information. Hyper-connections allow the model to learn more flexible inter-layer routing while maintaining the training stability that residual connections provide.
+
+It's too early to say whether this becomes standard — DeepSeek-V4 is the only model using it so far. But it's the first crack in the "residual connection is solved" consensus.
+
+---
+
+## Embeddings and the Output Layer
+
+The embedding layer is where tokens enter the model, and the output projection is where predictions come out. These bookends have evolved more than you might expect.
+
+### Token Embeddings
+
+Every transformer maps discrete token IDs to dense vectors via a learned embedding matrix $E$ of shape $[\text{vocab\_size}, d_{\text{model}}]$. Token ID 4523 → row 4523 of $E$ → a $d_{\text{model}}$-dimensional vector. That vector becomes the token's initial representation, entering the residual stream at layer 0.
+
+### Embedding Scaling: √d or Not?
+
+The original transformer multiplied embedding outputs by $\sqrt{d_{\text{model}}}$:
+
+$$\text{embed}(x) = E[x] \cdot \sqrt{d_{\text{model}}}$$
+
+**Why?** Embedding vectors are initialized with small values (standard deviation $\approx 1/\sqrt{d_{\text{model}}}$). The original transformer used fixed sinusoidal positional encodings with values in $[-1, 1]$. Without scaling, the embeddings would be much smaller in magnitude than the positional encodings and would be "drowned out." The $\sqrt{d_{\text{model}}}$ factor brings them to comparable scale.
+
+**Modern status**: Most models don't do this. With learned positional embeddings or RoPE (which modifies attention, not the embedding), there's no scale mismatch to correct for. LLaMA, GPT-2/3, Mistral, Qwen, DeepSeek — no embedding scaling.
+
+**Exception**: Gemma (all versions) **does** scale embeddings by $\sqrt{d_{\text{model}}}$. This is one of Gemma's distinctive architectural choices.
+
+### Weight Tying: Should Input and Output Share Weights?
+
+The output of the transformer goes through a final linear projection to produce logits over the vocabulary:
+
+$$\text{logits} = h \cdot W_{\text{out}}^T$$
+
+where $W_{\text{out}}$ has shape $[\text{vocab\_size}, d_{\text{model}}]$ — exactly the same shape as the embedding matrix $E$.
+
+**Weight tying** means using $W_{\text{out}} = E$ — the same matrix for both input embeddings and output projection.
+
+**Arguments for tying:**
+- Saves parameters. With a 200K vocabulary and $d_{\text{model}} = 5120$, that's $\sim$1B parameters saved.
+- Acts as a regularizer — the model must find embeddings that are useful both for representing tokens as input and distinguishing tokens as output.
+- Works well at smaller scales.
+
+**Arguments against tying:**
+- Forces input and output to share the same representation space. But these serve different purposes: input embeddings need to capture token *meaning*; output projections need to *distinguish* between tokens for prediction. These aren't necessarily the same thing.
+- At very large scales, the parameter savings become proportionally small (1B out of 400B is 0.25%), and the expressivity cost may matter more.
+
+**The trend**: weight tying was standard in the early era (BERT, GPT-2, T5, original transformer), but modern large models have moved away from it.
+
+| Ties Weights | Doesn't Tie Weights |
+|---|---|
+| Gemma 2/4 | LLaMA 1/2/3/4 |
+| GPT-2 | GPT-3 |
+| BERT, T5 | Mistral / Mixtral |
+| Smaller Qwen variants | DeepSeek-V3/V4 |
+| | Larger Qwen variants |
+| | PaLM |
+
+The pattern: as models got larger, weight tying fell out of favor. The representational flexibility of separate matrices matters more than the parameter savings at scale.
+
+### Vocabulary Size Growth
+
+| Year | Model | Vocab Size |
+|------|-------|-----------|
+| 2017 | Original Transformer | ~37K |
+| 2019 | GPT-2 | 50K |
+| 2023 | LLaMA 1/2 | 32K |
+| 2024 | LLaMA 3 | 128K |
+| 2024 | Gemma 2 | 256K |
+| 2025 | Qwen 3 | 152K |
+| 2026 | LLaMA 4 | 202K |
+| 2026 | Qwen 3.5 | 248K |
+| 2026 | Gemma 4 | 262K |
+
+Vocabularies have grown from ~32K to 200K-262K tokens. Larger vocabularies mean:
+- **Better compression ratio** — fewer tokens per text → faster inference and longer effective context
+- **Better multilingual coverage** — more languages get dedicated tokens instead of being split into subwords
+- **Better handling of code, numbers, special characters**
+- **Tradeoff**: larger embedding matrices, but at large model scales the cost is amortized
+
+### Per-Layer Embeddings: A New Approach (2026)
+
+Gemma 4's on-device models (E2B, E4B) introduce **Per-Layer Embeddings (PLE)**: each decoder layer has its **own** small embedding table instead of sharing one global embedding. This dramatically changes the parameter accounting — the E4B model has 8B total parameters but only 4.5B "effective" parameters, with the rest in per-layer embedding tables.
+
+The motivation is efficient on-device inference: PLE allows each layer to have a specialized input representation while keeping the core computation small. It's currently unique to Gemma 4's edge models.
+
+---
+
+## Multi-Token Prediction
+
+Standard language model training predicts one token at a time: given tokens $[1, \ldots, t]$, predict token $t+1$. Multi-Token Prediction (MTP) extends this: predict tokens $t+1, t+2, \ldots, t+k$ simultaneously.
+
+### How It Works
+
+The shared transformer backbone produces a latent representation $z_t$ for each position. Then $k$ independent prediction heads — each typically a small transformer layer followed by a projection — predict the next $k$ tokens:
+
+- Head 1: $z_t \rightarrow$ token $t+1$
+- Head 2: $z_t \rightarrow$ token $t+2$
+- Head 3: $z_t \rightarrow$ token $t+3$
+
+All heads share the same unembedding (output projection) matrix. The training loss is the sum of cross-entropy losses across all $k$ predictions.
+
+### Why It Helps
+
+**Better training signal**: Not all tokens are equally informative. Predicting just the next token means most training signal comes from "easy" tokens (articles, prepositions, formatting) that are highly predictable from local context. Multi-token prediction upweights "choice points" — semantically important tokens where the model's decision has cascading consequences. A token that affects the next 4 predictions implicitly gets a weight of $\frac{k(k+1)}{2}$ versus $k$ for an inconsequential token.
+
+**Faster inference via speculative decoding**: At inference time, the extra prediction heads serve as lightweight "draft models." The main model generates a candidate sequence of $k$ tokens in one forward pass, then verifies them in the next pass. If the drafts are good (which they often are), you get up to $k\times$ speedup. DeepSeek-V3/V4 reports ~3× inference speedup from self-speculative decoding using MTP heads.
+
+### Who Uses It
+
+- **DeepSeek-V3/V4**: `num_nextn_predict_layers: 1` — uses 1 additional prediction layer
+- **Qwen 3.5**: includes MTP in training and enables speculative decoding via the "NEXTN" algorithm
+- **Meta** published the foundational [MTP paper (Gloeckle et al., 2024)](https://arxiv.org/abs/2404.19737) showing 12% improvement on HumanEval at 13B scale
+
+MTP is still early — not every model uses it, and the optimal number of prediction heads is an active area of research. But it's a compelling training objective that also directly improves inference speed, which makes it likely to become standard.
+
+---
+
+## Decoder-Only: How One Architecture Won
+
+The original transformer (2017) was an **encoder-decoder** model:
+- **Encoder**: processes the input with bidirectional self-attention (every token sees every other token)
+- **Decoder**: generates output autoregressively, attending both to its own previous outputs (causal self-attention) and to the encoder's output (cross-attention)
+
+This made sense for machine translation: the encoder understands the source sentence, the decoder generates the translation.
+
+But the field moved to **decoder-only** — a single stack of transformer layers with causal masking (each token can only attend to previous tokens). Why?
+
+**1. Simplicity.** One architecture handles both "understanding" and "generation." No separate encoder and decoder, no cross-attention. Fewer moving parts.
+
+**2. Unified interface.** Everything is framed as "predict the next token." Input and output share the same architecture and processing. Want to translate? Put the source text in the context and generate. Want to summarize? Same thing. Want to do math? Same thing.
+
+**3. Scaling efficiency.** In encoder-decoder models, the encoder parameters are "idle" during generation, and the decoder parameters are "idle" during encoding. In decoder-only, every parameter is used for every token.
+
+**4. In-context learning.** Decoder-only models naturally support few-shot prompting — concatenate examples into the context and let the model continue the pattern. This emergent capability drove the GPT-3 revolution.
+
+**Modern status**: Every frontier LLM in 2026 is decoder-only — GPT-4, LLaMA 4, Gemma 4, Qwen 3.5, DeepSeek-V4, Claude, Mistral. The encoder-decoder architecture survives only in specialized models (some speech and translation systems).
+
+---
+
+## Small But Important Changes
+
+Some changes don't deserve their own section but collectively reshape what a modern transformer looks like.
+
+### Bias Removal
+
+The original transformer included bias terms in every linear layer — attention projections (Q, K, V, O) and FFN layers.
+
+Modern models remove biases almost everywhere:
+- LLaMA: no biases anywhere
+- PaLM: no biases
+- Mistral: no biases
+- DeepSeek: no biases
+- Gemma: no biases
+
+**Why?** Three reasons:
+1. With pre-norm, the normalization layer can absorb the effect of biases
+2. Removing biases simplifies tensor parallelism (no need to handle bias replication across GPUs)
+3. Empirically, no quality loss
+
+**The savings aren't in parameters** (biases are tiny relative to weight matrices) — they're in **engineering simplicity** during distributed training.
+
+### Dropout Removal
+
+The original transformer used dropout ($p = 0.1$) in three places: attention weights, residual connections, and embeddings.
+
+Modern large LLMs use **zero dropout** during pretraining. The rationale: with enough data (trillions of tokens), there's no overfitting risk, and dropout actively hurts training efficiency by randomly zeroing out activations. Some models still use dropout during fine-tuning on smaller datasets.
+
+### Knowledge Distillation as Training Strategy
+
+Knowledge distillation — training a smaller model to mimic a larger model's outputs — has evolved from a post-training compression technique into a **first-class training strategy**:
+
+- **Gemma 2/3/4**: The 2B and 9B models are explicitly distilled from larger models *during pre-training*, not after. The smaller model is designed from the start to be a distillation target.
+- **DeepSeek-V4**: Post-training uses long chain-of-thought (CoT) distillation from reasoning traces.
+
+This is an architectural decision, not just a training trick — it affects what model sizes you design, what training data you use, and what training objectives you optimize.
+
+---
+
+## The Standard Modern LLM Recipe (2026)
+
+If you were to build a new LLM today following current best practices, here's what the non-attention architecture would look like:
+
+| Component | Original (2017) | Modern (2026) |
+|-----------|-----------------|---------------|
+| Architecture | Encoder-decoder | Decoder-only |
+| Normalization | LayerNorm, post-norm | RMSNorm, pre-norm |
+| Final norm | Not needed (post-norm) | RMSNorm before output head |
+| FFN | 2 linear + ReLU, 4x hidden | SwiGLU, 8/3x hidden |
+| Activation | ReLU | SiLU (inside SwiGLU) |
+| Residual | $x + f(x)$ | $x + f(\text{Norm}(x))$ |
+| Biases | Everywhere | Nowhere |
+| Dropout | 0.1 | 0.0 |
+| Weight tying | Yes | No (at large scale) |
+| Embedding scaling | $\sqrt{d_{\text{model}}}$ | No (except Gemma) |
+| Vocab size | ~37K | 150K-262K |
+| Init scaling | Xavier | Depth-scaled residual projections |
+
+This recipe is essentially what LLaMA 3/4, Mistral, Qwen 3/3.5, and DeepSeek-V3/V4 all converge on. The differences between frontier models are mostly in attention mechanisms, MoE configurations, and training strategies — the non-attention building blocks are nearly identical.
+
+That convergence is remarkable. In 2017, there were genuine open questions about normalization placement, activation function choice, FFN architecture, and embedding strategies. By 2026, the field has tried the alternatives and settled. The recipe above isn't frozen — DeepSeek-V4's hyper-connections and Gemma 4's PLE show that innovation continues — but the baseline is established.
+
+The next time someone tells you "attention is all you need," remind them: attention is the brain, but it needs a body. And the body matters just as much.
+
+---
+
+## References
+
+- **[Attention Is All You Need](https://arxiv.org/abs/1706.03762)** (Vaswani et al., 2017) — The original transformer.
+- **[GLU Variants Improve Transformer](https://arxiv.org/abs/2002.05202)** (Shazeer, 2020) — SwiGLU, GeGLU, ReGLU.
+- **[Knowledge Neurons in Pretrained Transformers](https://arxiv.org/abs/2104.08696)** (Dai et al., 2022) — Factual knowledge is stored in FFN weights.
+- **[Residual Networks Behave Like Ensembles of Relatively Shallow Networks](https://arxiv.org/abs/1605.06431)** (Veit et al., 2016) — Ensemble interpretation of residual connections.
+- **[Root Mean Square Layer Normalization](https://arxiv.org/abs/1910.07467)** (Zhang & Sennrich, 2019) — RMSNorm.
+- **[On Layer Normalization in the Transformer Architecture](https://arxiv.org/abs/2002.04745)** (Xiong et al., 2020) — Pre-norm vs post-norm analysis.
+- **[Gaussian Error Linear Units (GELUs)](https://arxiv.org/abs/1606.08415)** (Hendrycks & Gimpel, 2016) — GELU activation.
+- **[Searching for Activation Functions](https://arxiv.org/abs/1710.05941)** (Ramachandran et al., 2017) — Swish/SiLU.
+- **[Using the Output Embedding to Improve Language Models](https://arxiv.org/abs/1608.05859)** (Press & Wolf, 2017) — Weight tying.
+- **[Better & Faster Large Language Models via Multi-token Prediction](https://arxiv.org/abs/2404.19737)** (Gloeckle et al., 2024) — Multi-token prediction.
+- **[LLaMA: Open and Efficient Foundation Language Models](https://arxiv.org/abs/2302.13971)** (Touvron et al., 2023) — LLaMA recipe.
+- **[DeepSeek-V3 Technical Report](https://arxiv.org/abs/2412.19437)** (DeepSeek-AI, 2024) — DeepSeek-V3 architecture.
+
+---
+
+*This post is part of [The Gradient Descent through Transformers](/blog) — a series dissecting every component of the modern transformer stack.*
