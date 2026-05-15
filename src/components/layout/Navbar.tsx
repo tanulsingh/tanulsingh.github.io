@@ -53,13 +53,6 @@ export function Navbar() {
               {item.label}
             </Link>
           ))}
-          <Link
-            href="/cv.pdf"
-            className="text-sm font-medium transition-colors hover:opacity-80"
-            style={{ color: "var(--text-secondary)" }}
-          >
-            CV
-          </Link>
           <ThemeToggle />
         </div>
 
@@ -98,13 +91,6 @@ export function Navbar() {
                 {item.label}
               </Link>
             ))}
-            <Link
-              href="/cv.pdf"
-              className="rounded-lg px-4 py-2.5 text-sm font-medium"
-              style={{ color: "var(--text-secondary)" }}
-            >
-              CV
-            </Link>
           </div>
         </div>
       )}
