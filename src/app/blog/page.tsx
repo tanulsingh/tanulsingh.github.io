@@ -16,6 +16,20 @@ const SERIES = [
       "A component-by-component deep dive into the modern transformer stack — how every piece evolved from 2017 to 2026, and why each one matters.",
     tag: "The Gradient Descent through Transformers",
   },
+  {
+    id: "loss-landscape-llm-training",
+    title: "The Loss Landscape of LLM Training",
+    description:
+      "From random weights to aligned intelligence — pre-training, distributed systems, fine-tuning, RLHF, DPO, and the frontier of reasoning and agents.",
+    tag: "The Loss Landscape of LLM Training",
+  },
+  {
+    id: "the-inference-engine",
+    title: "The Inference Engine",
+    description:
+      "How transformers serve predictions at scale — autoregressive generation, KV cache, batching, quantization, speculative decoding, and production serving.",
+    tag: "The Inference Engine",
+  },
 ];
 
 export default function BlogPage() {
