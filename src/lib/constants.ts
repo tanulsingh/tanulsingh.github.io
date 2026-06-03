@@ -66,3 +66,8 @@ export const highlights = [
     icon: "flame",
   },
 ] as const;
+
+// Tag-level hide list — posts with any of these tags are filtered out from the
+// blog index, papers index, and homepage. Use to hide entire series that
+// haven't shipped yet without deleting their stubs.
+export const HIDDEN_TAGS = ["The Inference Engine"];

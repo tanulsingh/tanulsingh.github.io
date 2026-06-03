@@ -1,0 +1,38 @@
+---
+title: "Fine-Tuning II: SFT, Quantization, and Model Merging"
+date: "2026-06-10"
+tags: ["LLM Training", "SFT", "Quantization", "Model Merging", "GPTQ", "AWQ", "The Loss Landscape of LLM Training"]
+author: "Tanul Singh"
+description: "The practical fine-tuning pipeline — supervised fine-tuning mechanics, quantization from fundamentals through GPTQ/AWQ/NF4, and model merging techniques (TIES, DARE, task arithmetic)."
+summary: "How to actually turn a base model into a useful assistant: chat formatting, loss masking, catastrophic forgetting mitigation. Plus the full quantization stack from symmetric/asymmetric fundamentals through INT4/NF4/FP8 formats to GPTQ and AWQ. And model merging — combining capabilities without retraining."
+featured: true
+draft: true
+---
+
+*This is Part 5 of [**The Loss Landscape of LLM Training**](/blog) — a series covering everything from pre-training through fine-tuning to alignment.*
+
+*Previously: [Fine-Tuning I: LoRA, Adapters, and All Things PEFT](/blog/peft-lora)*
+
+---
+
+## Coming Soon
+
+Topics to cover:
+- Instruction tuning vs task-specific fine-tuning vs continual pre-training
+- Chat formatting (ChatML, Alpaca, ShareGPT), multi-turn training
+- Loss masking (completions only), packing with attention masks
+- Catastrophic forgetting (EWC, replay, L2 regularization)
+- NEFTune, label smoothing, SFT data quality vs quantity
+- **Quantization fundamentals**: symmetric/asymmetric, per-tensor/channel/group
+- INT8, INT4, NF4, FP4, FP8 formats
+- PTQ methods: GPTQ, AWQ, SmoothQuant, bitsandbytes, AQLM, QuIP#
+- Quantization-aware training (QAT)
+- **Model merging**: linear interpolation, SLERP, TIES, DARE, task arithmetic, frankenmerging
+
+---
+
+*Next up: [RLHF: Reward Models and PPO](/blog/rlhf-ppo)*
+
+---
+
+*Found this useful? The full series: [The Loss Landscape of LLM Training](/blog)*

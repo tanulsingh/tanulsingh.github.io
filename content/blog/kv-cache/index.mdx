@@ -1,0 +1,36 @@
+---
+title: "The KV Cache: Memory, Paging, and Compression"
+date: "2026-07-15"
+tags: ["LLM Inference", "KV Cache", "PagedAttention", "vLLM", "The Inference Engine"]
+author: "Tanul Singh"
+description: "Everything about the KV cache — memory arithmetic, PagedAttention's virtual memory approach, quantization, prefix caching, chunked prefill, and disaggregated serving."
+summary: "The KV cache is the single biggest memory bottleneck in LLM inference. This post covers its memory arithmetic, vLLM's PagedAttention (the virtual memory analogy), KV cache quantization, prefix caching, sliding window tricks, and the disaggregated prefill/decode architecture."
+featured: true
+draft: true
+---
+
+*This is Part 3 of [**The Inference Engine**](/blog) — a series covering how transformers serve predictions at scale.*
+
+*Previously: [Decoding Strategies: From Greedy to Guided](/blog/decoding-strategies)*
+
+---
+
+## Coming Soon
+
+Topics to cover:
+- KV cache memory arithmetic
+- PagedAttention (vLLM) — the virtual memory analogy
+- KV cache quantization (INT8, FP8)
+- Prefix caching / prompt caching
+- Sliding window attention at inference (StreamingLLM, attention sinks)
+- Token eviction / cache pruning
+- Chunked prefill
+- Disaggregated prefill and decode
+
+---
+
+*Next up: [Batching, Scheduling, and Serving](/blog/batching-serving)*
+
+---
+
+*Found this useful? The full series: [The Inference Engine](/blog)*

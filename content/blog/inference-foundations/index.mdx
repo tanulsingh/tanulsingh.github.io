@@ -1,0 +1,32 @@
+---
+title: "Foundations: How Autoregressive Generation Actually Works"
+date: "2026-07-05"
+tags: ["LLM Inference", "KV Cache", "Prefill", "Decode", "The Inference Engine"]
+author: "Tanul Singh"
+description: "The mechanics of LLM inference from first principles — autoregressive generation step by step, prefill vs decode phases, KV cache, arithmetic intensity, and why generation is memory-bound."
+summary: "Before optimizing inference, you must understand it. This post walks through how a transformer generates text token by token, why the KV cache exists, what makes prefill compute-bound and decode memory-bound, and the roofline model that explains every optimization to come."
+featured: true
+draft: true
+---
+
+*This is Part 1 of [**The Inference Engine**](/blog) — a series covering how transformers serve predictions at scale, from basic generation through to production serving systems.*
+
+---
+
+## Coming Soon
+
+Topics to cover:
+- Step-by-step autoregressive generation
+- Prefill vs decode phases (compute-bound vs memory-bound)
+- KV cache — what it is, why it exists, how it grows
+- Arithmetic intensity, roofline model
+- Memory analysis (what lives where on the GPU)
+- TTFT vs TPOT — the two latencies that matter
+
+---
+
+*Next up: [Decoding Strategies: From Greedy to Guided](/blog/decoding-strategies)*
+
+---
+
+*Found this useful? The full series: [The Inference Engine](/blog)*

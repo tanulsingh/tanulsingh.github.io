@@ -1,0 +1,37 @@
+---
+title: "The Numerics: Precision, Optimizers, and Stability"
+date: "2026-05-30"
+tags: ["LLM Training", "Mixed Precision", "Adam", "Training Stability", "The Loss Landscape of LLM Training"]
+author: "Tanul Singh"
+description: "The numerical machinery of LLM training — mixed precision formats, optimizer algorithms, learning rate schedules, and the stability techniques that prevent a billion-dollar training run from diverging."
+summary: "Training a large model is a numerical tightrope. This post covers everything that determines whether gradients flow or explode: FP16/BF16/FP8 precision, Adam and its successors, learning rate schedules, gradient clipping, and the stability tricks (QK-norm, z-loss, µP) that keep training on track."
+featured: true
+draft: true
+---
+
+*This is Part 3 of [**The Loss Landscape of LLM Training**](/blog) — a series covering everything from pre-training through fine-tuning to alignment.*
+
+*Previously: [Distributed Training: Making It Fit](/blog/distributed-training)*
+
+---
+
+## Coming Soon
+
+Topics to cover:
+- Mixed precision: FP32 → FP16 → BF16 → FP8 (loss scaling, master weights)
+- Optimizers: Adam, AdamW, 8-bit Adam, Adafactor, LION, Muon, schedule-free
+- LR schedules: warmup, cosine, WSD, inverse sqrt
+- Batch size warmup, linear scaling rule
+- Gradient clipping, weight decay
+- Training instabilities: loss spikes, attention logit growth, embedding divergence
+- QK LayerNorm, z-loss, residual scaling
+- µP (maximal update parameterization) for hyperparameter transfer
+- torch.compile, operator fusion, CUDA graphs
+
+---
+
+*Next up: [Fine-Tuning I: LoRA, Adapters, and All Things PEFT](/blog/peft-lora)*
+
+---
+
+*Found this useful? The full series: [The Loss Landscape of LLM Training](/blog)*

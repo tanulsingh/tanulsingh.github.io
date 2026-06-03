@@ -35,7 +35,7 @@ export const mdxComponents: MDXComponents = {
   PrePostNormVisualizer,
 
   img: (props) => (
-    <figure className="my-8">
+    <span className="my-8 block">
       <img
         {...props}
         className="w-full rounded-lg"
@@ -43,14 +43,14 @@ export const mdxComponents: MDXComponents = {
         loading="lazy"
       />
       {props.alt && (
-        <figcaption
-          className="mt-2 text-center text-sm"
+        <span
+          className="mt-2 block text-center text-sm"
           style={{ color: "var(--text-muted)" }}
         >
           {props.alt}
-        </figcaption>
+        </span>
       )}
-    </figure>
+    </span>
   ),
 
   a: (props) => {

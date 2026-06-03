@@ -112,7 +112,17 @@ export function HeroSection() {
           className="absolute hidden md:block"
           style={{ bottom: "-120px", left: 0 }}
         >
-          <ArrowDown size={16} className="animate-bounce" style={{ color: "var(--text-muted)" }} />
+          <a
+            href="#training-loop"
+            aria-label="Scroll to my training curve"
+            className="inline-block transition-opacity hover:opacity-80"
+          >
+            <ArrowDown
+              size={16}
+              className="animate-bounce"
+              style={{ color: "var(--text-muted)" }}
+            />
+          </a>
         </motion.div>
       </div>
     </section>

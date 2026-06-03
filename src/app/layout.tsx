@@ -65,8 +65,8 @@ export default function RootLayout({
       suppressHydrationWarning
       className={`${inter.variable} ${sourceSerif.variable} ${jetbrainsMono.variable}`}
     >
-      <body className="min-h-screen font-sans antialiased">
-        <ThemeProvider attribute="class" defaultTheme="dark" enableSystem>
+      <body className="min-h-screen font-serif antialiased">
+        <ThemeProvider attribute="class" defaultTheme="light" enableSystem>
           <ConstellationCanvas />
           <div className="glass-overlay" />
           <div className="relative z-10 flex min-h-screen flex-col">

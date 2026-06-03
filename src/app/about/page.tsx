@@ -65,7 +65,7 @@ export default function AboutPage() {
           >
             About Me
           </p>
-          <h1 className="mb-4 text-4xl font-bold tracking-tight">
+          <h1 className="mb-4 text-4xl font-bold tracking-tight" style={{ fontFamily: "var(--font-serif)" }}>
             Tanul Singh
           </h1>
           <p
@@ -108,7 +108,7 @@ export default function AboutPage() {
 
       {/* The Story */}
       <section className="mb-16">
-        <h2 className="mb-6 text-2xl font-bold">The Story</h2>
+        <h2 className="mb-6 text-2xl font-bold" style={{ fontFamily: "var(--font-serif)" }}>The Story</h2>
         <div className="space-y-4 leading-relaxed" style={{ color: "var(--text-secondary)" }}>
           <p>
             I come from a very small town in Uttar Pradesh, India. Growing up, the only
@@ -147,7 +147,7 @@ export default function AboutPage() {
 
       {/* What I Do at Apple */}
       <section className="mb-16">
-        <h2 className="mb-6 text-2xl font-bold">What I Do at Apple</h2>
+        <h2 className="mb-6 text-2xl font-bold" style={{ fontFamily: "var(--font-serif)" }}>What I Do at Apple</h2>
         <div className="space-y-4 leading-relaxed" style={{ color: "var(--text-secondary)" }}>
           <p>
             My work at Apple sits at the intersection of research and applied AI —
@@ -171,7 +171,7 @@ export default function AboutPage() {
 
       {/* Patents & Publications */}
       <section className="mb-16">
-        <h2 className="mb-6 text-2xl font-bold">Patents &amp; Publications</h2>
+        <h2 className="mb-6 text-2xl font-bold" style={{ fontFamily: "var(--font-serif)" }}>Patents &amp; Publications</h2>
         <div className="space-y-4">
           <Link
             href="https://pubchem.ncbi.nlm.nih.gov/patent/US-12361933-B1"
@@ -212,7 +212,7 @@ export default function AboutPage() {
 
       {/* Kaggle */}
       <section className="mb-16">
-        <h2 className="mb-6 text-2xl font-bold">Kaggle Achievements</h2>
+        <h2 className="mb-6 text-2xl font-bold" style={{ fontFamily: "var(--font-serif)" }}>Kaggle Achievements</h2>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {achievements.map((a) => (
             <Link
@@ -234,7 +234,7 @@ export default function AboutPage() {
 
       {/* Self-Teaching */}
       <section className="mb-16">
-        <h2 className="mb-6 text-2xl font-bold">How I Learned</h2>
+        <h2 className="mb-6 text-2xl font-bold" style={{ fontFamily: "var(--font-serif)" }}>How I Learned</h2>
         <p className="mb-4" style={{ color: "var(--text-secondary)" }}>
           No degree in CS or AI. These courses, plus thousands of hours on Kaggle
           and reading papers, are what built my foundation:
@@ -258,7 +258,7 @@ export default function AboutPage() {
 
       {/* Conversations */}
       <section>
-        <h2 className="mb-6 text-2xl font-bold">Featured Conversations</h2>
+        <h2 className="mb-6 text-2xl font-bold" style={{ fontFamily: "var(--font-serif)" }}>Featured Conversations</h2>
         <div className="grid gap-4 sm:grid-cols-2">
           <Link
             href="https://www.youtube.com/watch?v=t-kiCW0jdLg&t=490s"

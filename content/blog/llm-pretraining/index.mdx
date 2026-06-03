@@ -1,0 +1,514 @@
+---
+title: "Pre-Training: Teaching a Model to Predict"
+date: "2026-05-20"
+tags: ["LLM Training", "Pre-training", "Scaling Laws", "Teacher Forcing", "The Loss Landscape of LLM Training"]
+author: "Tanul Singh"
+description: "How LLMs learn from raw text — the three stages of frontier LLM training, what pre-training is actually trying to achieve, next-token prediction, data curation, scaling laws, and the modern multi-phase recipe used by Llama 3."
+summary: "Before fine-tuning and alignment, a base model has to learn the structure of language and the shape of the world from raw text. This post covers where pre-training sits in the LLM pipeline, why next-token prediction works, how trillions of tokens get curated, how scaling laws decide model size, and the three internal phases — initial training, long-context extension, annealing — that produce a modern base model."
+featured: true
+---
+
+*This is Part 1 of [**The Loss Landscape of LLM Training**](/blog) — a series covering everything from pre-training through fine-tuning to alignment, explaining how modern LLMs go from random weights to aligned intelligence.*
+
+*Previously: [The Gradient Descent through Transformers](/blog/transformer-anatomy) (architecture series)*
+
+---
+
+## The Three Stages of a Frontier LLM
+
+Before we dive into pre-training, it helps to know where it sits in the larger pipeline. Every frontier LLM in 2026 — GPT, Claude, Gemini, Llama, DeepSeek, Qwen — is produced by the same three-stage recipe at its core (there can be numerous tweaks in each stage but the stages remain more or less the same):
+
+| Stage | What it does | What it produces | Compute share |
+|---|---|---|---|
+| **1. Pre-training** | Train on trillions of tokens of raw text with next-token prediction | A **base model** with broad world knowledge and language fluency, but no notion of "instructions" or "helpfulness" | ~98% |
+| **2. Supervised Fine-Tuning (SFT)** | Train on curated `(prompt, response)` pairs — often partially synthetic, partially human-written | An **instruction-tuned model** that follows requests in a chat format | ~1–2% |
+| **3. Post-training / Alignment** | Train against human preference data using RLHF, DPO, or similar | A **chat model** aligned with human preferences — helpful, harmless, honest(ish) | ~0.1–1% |
+
+The base model out of stage 1 cannot really "talk to you." If you prompt it with "What is the capital of France?", it might continue with "What is the capital of Germany? What is the capital of Italy?" — because the most likely continuation of a list of geography questions is more geography questions. It has the knowledge but not the *behavior*.
+
+Stages 2 and 3 are what turn a base model into something you can chat with. The rest of this series will cover them in detail. **This post is entirely about stage 1.**
+
+---
+
+## What Pre-Training Is Trying to Achieve
+
+It's easy to lose sight of the goal once you're deep in data pipelines and scaling laws. So let's state it plainly.
+
+**Goal:** Produce a base model whose internal representations encode the structure of human language and a large fraction of human knowledge — such that, given any text, it can predict what comes next as accurately as possible.
+
+The word *accurately* is doing all the work here. To accurately predict the next token of:
+
+> "The patient presented with fever, productive cough, and shortness of breath. The chest X-ray showed bilateral..."
+
+…the model needs to know medicine well enough to assign high probability to plausible findings (`infiltrates`, `consolidation`, `opacities`) and low probability to nonsense. To predict the continuation of a chess transcript, it needs chess. To predict the next line of a Python file, it needs programming.
+
+**The bet behind pre-training:** if you make a model good enough at this single objective — across the full diversity of human-written text — it will, as a side effect, build the representations needed for almost every downstream task. Reasoning, knowledge recall, coding, translation, math: they all emerge from the same loss.
+
+### Prediction is Compression is Understanding
+
+There is a formal reason to believe this bet works, due to Shannon. Any probability model `P(x)` defines an optimal code: a symbol with probability `P` can be encoded in `−log₂ P` bits (via arithmetic coding). The cross-entropy loss
+
+$$\mathcal{L} = -\frac{1}{T}\sum_t \log_2 P_\theta(x_t \mid x_{<t})$$
+
+is *literally* the average number of bits per token your model would use to compress the data. Lower loss = better compression.
+
+And better compression *requires* finding structure. If your data is `AAAA BBBB AAAA BBBB AAAA BBBB …`, a model that hasn't discovered the period pays roughly 1 bit per symbol. A model that discovers the rule "blocks of 4, alternating" pays nearly 0 bits per symbol. **The only path to compressing a sequence well is to find the regularities that generated it.**
+
+Scaled up to text, this means: the only path to low pre-training loss is to internalize grammar, facts, logic, narrative structure, coding conventions — every regularity the data contains. A perfect compressor of the internet would be indistinguishable from something that understood the internet, because there is no other way to be a perfect compressor.
+
+[Delétang et al. (2023)](https://arxiv.org/abs/2309.10668) made this concrete: LLMs are state-of-the-art *general-purpose* compressors, beating PNG on images and FLAC on audio despite being trained only on text. The compression-understanding equivalence isn't a metaphor; it's a measurable fact.
+
+### What success looks like
+
+A successful base model has three properties:
+
+1. **Low held-out loss** on diverse text (the direct training signal).
+2. **Strong few-shot performance** — given a handful of examples in-context, it can perform tasks it was never explicitly trained on.
+3. **Smooth scaling behavior** — bigger model and more data predictably lowers loss, which predictably improves downstream benchmarks.
+
+A base model that hits these three things is "ready" for stages 2 and 3, which sculpt behavior on top of capability.
+
+### Why this stage dominates compute
+
+Pre-training a frontier model in 2026 costs $50M–$500M+ in compute, runs for months on tens of thousands of GPUs, and processes 10–20 *trillion* tokens. SFT runs on millions of tokens and finishes in hours; RLHF on tens of millions and finishes in days. The asymmetry is staggering — and it's *because* pre-training is the stage where capability is created. Everything after is fine-grained re-shaping.
+
+---
+
+## The Training Objective: Next-Token Prediction
+
+Given the goal — predict-everything — the simplest possible loss does the job:
+
+$$\mathcal{L}(\theta) = -\frac{1}{T} \sum_{t=1}^{T} \log P_\theta(x_t \mid x_{<t})$$
+
+For each position $t$, the model's final layer produces logits $z \in \mathbb{R}^{|V|}$ (one score per vocabulary token), softmax turns them into probabilities, and we compute cross-entropy against the actual next token.
+
+No labels. No human supervision. No task definition. Just: given everything you've read so far, what word comes next?
+
+### Why Cross-Entropy and Not Something Else
+
+Cross-entropy isn't an arbitrary choice — it's the mathematically correct loss for this setting.
+
+**The output is categorical.** The model predicts a distribution over $|V|$ discrete tokens (typically 32K–128K). MSE would measure Euclidean distance between probability vectors, which doesn't respect the geometry of probability. Two distributions that are "close" in Euclidean space can be very different in information-theoretic terms, and vice versa.
+
+**Cross-entropy = maximum likelihood.** Minimizing $-\log P_\theta(x_t \mid x_{<t})$ is equivalent to maximizing the likelihood of the data under the model. And minimizing cross-entropy $H(p, q)$ equals minimizing $D_{KL}(p \| q) + H(p)$. Since $H(p)$ is constant (the true data has fixed entropy), we're directly minimizing the KL divergence between data and model — the most natural measure of "how wrong is the model."
+
+**The gradient is clean.** Cross-entropy with softmax gives the beautifully simple gradient $\nabla_{z_k} \mathcal{L} = p_k - \mathbb{1}[k = \text{target}]$. Linear in the prediction error. If the model puts probability 0.9 on the right token, gradient is 0.1. If 0.01, gradient is 0.99. MSE on softmax outputs has $p_k(1 - p_k)$ terms that vanish when the model is *confidently wrong* — exactly when you most need a strong learning signal. Cross-entropy never has this problem.
+
+### How the model sees a training example
+
+A training example is a sequence of tokens `[t1, t2, t3, t4, t5]`. The input and targets are:
+
+```
+Position:  0    1    2    3    4
+Input:    [t1,  t2,  t3,  t4,  t5]
+Target:   [t2,  t3,  t4,  t5,   -]
+```
+
+The causal attention mask ensures position $i$ can only attend to positions $\leq i$. Every position contributes a training signal: a sequence of length $T$ yields $T - 1$ loss terms in a single forward pass.
+
+This is hugely efficient. One forward pass through a 4096-token sequence produces 4095 training signals. BERT's masked language modeling, by contrast, masks ~15% of tokens — the same sequence yields only ~614 training signals. This 6.7× efficiency advantage is one big reason causal LM won.
+
+### Teacher Forcing: why training is fast and inference is slow
+
+The reason a model that takes 30 seconds to write a response was trained on trillions of tokens in a few weeks is a trick called **teacher forcing**.
+
+During training, at each position $t$, the model receives the **ground-truth token** $x_t$ as input — not its own prediction. Since we already know all the tokens (they're the training data), we can feed the entire sequence at once and let the causal mask handle the rest.
+
+This sounds like an implementation detail. It's not. It changes training from $O(T)$ sequential steps to $O(1)$ sequential steps.
+
+**During inference**, the model is inherently sequential:
+
+```
+Feed prompt → predict token 1
+Append token 1 → predict token 2
+Append token 2 → predict token 3
+...
+```
+
+Each step depends on the previous step's output. Generating 1000 tokens = 1000 sequential forward passes.
+
+**During training with teacher forcing**, all 4096 predictions happen in a single forward pass — one giant matrix multiplication. The causal mask ensures position 3 only "sees" positions 0–3, exactly as if we'd fed them sequentially. Training is ~4096× more parallelizable per sequence than inference.
+
+### Exposure bias and why nobody fixes it
+
+Teacher forcing creates a train–test mismatch: training sees perfect ground-truth prefixes, inference sees the model's own (possibly wrong) prefixes. The model may not recover gracefully when a mistake shifts it off the training distribution.
+
+[Bengio et al. (2015)](https://arxiv.org/abs/1506.03099) proposed **scheduled sampling** — replace some ground-truth inputs with model predictions during training, with gradually increasing probability. Nobody does this for LLMs, for three reasons:
+
+1. **It destroys parallelism.** If position $t+1$'s input depends on position $t$'s output, you're back to sequential computation. Dealbreaker.
+2. **The problem barely exists at scale.** When loss is low (2–3 nats/token for strong LLMs), predictions are usually right; self-generated text overlaps heavily with training distribution.
+3. **RLHF solves it better.** Post-training alignment trains on the model's own generations and also optimizes for quality, not just distribution match.
+
+---
+
+## Alternative Objectives and Why Autoregressive Won
+
+Next-token prediction won — but it wasn't the only contender. The losers are worth understanding because they explain the design space.
+
+**Masked Language Modeling (BERT, 2018):** Randomly mask 15% of tokens and predict them using bidirectional attention. Powerful for understanding but broken for generation — at inference there are no masks, so the model can't naturally produce text. Also wastes 85% of positions.
+
+**Span Corruption (T5, 2019):** Replace contiguous spans with sentinel tokens; predict the missing spans. More efficient than per-token MLM, but encoder-decoder splits parameters and adds cross-attention overhead.
+
+**Replaced Token Detection (ELECTRA, 2020):** Small generator corrupts tokens; discriminator detects which were replaced. Every token gets a training signal, but the two-model setup didn't scale.
+
+**Mixture of Denoisers (UL2, 2022):** [Tay et al. (2022)](https://arxiv.org/abs/2205.05131) mixed multiple objectives with mode tokens signaling which is active. UL2-20B beat GPT-3-175B on zero-shot SuperGLUE, but the complexity hasn't been adopted.
+
+**Why autoregressive won:**
+1. Every position is a training signal — 6.7× more efficient than MLM.
+2. Naturally enables generation without architectural hacks.
+3. In-context learning emerged primarily in autoregressive models.
+4. Simpler — one model, one objective, one forward pass.
+5. Scaling laws hold cleanly — loss predicts downstream performance across many orders of magnitude.
+
+### Fill-in-the-Middle (FIM)
+
+Standard left-to-right training can only generate given a prefix. It can't fill a gap — a critical capability for code completion in IDEs.
+
+[Bavarian et al. (2022)](https://arxiv.org/abs/2207.14255) showed you can teach a causal LM to infill **by just restructuring the training data** — no architectural change. Split a document into prefix/middle/suffix and rearrange:
+
+```
+<PRE> prefix_text <SUF> suffix_text <MID> middle_text
+```
+
+The model still predicts left-to-right, but the new format means it predicts the middle conditioned on both sides. Applied to ~50% of training examples, FIM adds infilling capability with **no degradation** on standard left-to-right. StarCoder, Code Llama, and most code models use it.
+
+### Multi-Token Prediction
+
+Standard training predicts one token per position. [Gloeckle et al. (2024)](https://arxiv.org/abs/2404.19737) at Meta asked: what if we predict the next $k$ tokens simultaneously? Shared transformer backbone → $k$ independent prediction heads:
+
+$$\mathcal{L} = \sum_{i=1}^{k} \mathcal{L}_i, \quad \mathcal{L}_i = -\frac{1}{T}\sum_{t=1}^{T} \log P_{\theta_i}(x_{t+i} \mid x_{\leq t})$$
+
+**Why it helps:** not all tokens are equally informative. Most signal comes from "easy" high-probability tokens (articles, prepositions). Multi-token prediction upweights **choice points** — if predicting token $t$ wrong cascades into tokens $t+1, \ldots, t+k$ being wrong too, that token gets a stronger implicit gradient. Encourages longer-range representations.
+
+DeepSeek-V3/R1 uses $k=2$ multi-token prediction (the extra head also enables speculative decoding at inference).
+
+---
+
+## The Data Pipeline
+
+Data is the model. Two models with identical architectures and training compute, but different data, will differ wildly in quality. The pipeline from raw web to training-ready tokens is where most of the engineering effort goes.
+
+### The Public Dataset Landscape
+
+| Dataset | Size | Year | Key Innovation |
+|---------|------|------|----------------|
+| **The Pile** | ~300B tokens | 2020 | 22 diverse sub-datasets (web, books, GitHub, PubMed, arXiv, StackExchange). Diversity-first. |
+| **RefinedWeb** | ~600B tokens | 2023 | Web-only, aggressive dedup. Showed neutral filtering can match curated corpora. |
+| **RedPajama v2** | ~30T tokens | 2023 | 84 Common Crawl snapshots, 50+ quality signals per doc — raw signals so users apply their own filters. |
+| **Dolma** | 3T tokens | 2024 | AI2's open corpus for OLMo. Common Crawl + code + books + papers + Wikipedia. |
+| **FineWeb** | 15T+ tokens | 2024 | HuggingFace's Common Crawl extraction (2013–2025), fully reproducible quality pipeline. |
+| **DCLM** | 4T tokens | 2024 | fastText quality classifier trained on curated data. 2.6T filtered tokens matched Llama 3's 15T at 7B scale. |
+| **The Stack v2** | 67.5TB | 2024 | Code from Software Heritage — 3.28B files, 658 languages, license + PII handling. |
+
+**What frontier models used:**
+- **Llama 3:** 15T+ tokens "publicly available online data," 8 languages.
+- **DeepSeek V3:** 14.8T tokens. First to validate FP8 training at 671B scale.
+- **Qwen 2.5:** Undisclosed, but ~128K vocab and 131K context.
+
+### The Web Curation Pipeline (Llama 3's recipe)
+
+The Llama 3 paper is unusually detailed about this. Here is their full pipeline, which is broadly representative of frontier practice:
+
+**1. PII & safety filtering.** Drop entire domains flagged for unsafe content, high PII volume, or adult content. Done at the domain level before extracting anything.
+
+**2. Text extraction.** Custom HTML parser that beats third-party tools in human eval. Special handling:
+- Math/code pages: preserve structure carefully
+- Retain `alt` text on images — math is often rendered as images with LaTeX in alt
+- **Strip markdown markers** — markdown turns out to *hurt* models trained primarily on web data
+
+**3. De-duplication (three levels).**
+- **URL-level:** keep the most recent version per URL globally.
+- **Document-level:** global MinHash near-duplicate removal.
+- **Line-level (ccNet-style):** remove lines appearing more than 6 times per 30M-doc bucket. Kills cookie banners, nav menus, also some high-quality frequent text — net win in ablations.
+
+**4. Heuristic filters.**
+- **Duplicated n-gram coverage ratio** ([Rae et al., 2021](https://arxiv.org/abs/2112.11446)) — kills repeated log/error lines that escape line-dedup.
+- **"Dirty word" counting** — catches adult content missed by domain blocklists.
+- **Token-distribution KL divergence** — drops docs with anomalous token distributions vs. corpus.
+
+**5. Model-based quality classifiers.** Two tiers:
+- *Fast:* fastText classifier trained to recognize Wikipedia-style references (Llama 1 style).
+- *Heavy:* DistilRoberta trained on **Llama 2 labels** — they prompted Llama 2 chat with quality criteria, then distilled into DistilRoberta for throughput.
+
+**6. Code & reasoning sub-pipelines.** Separate from general web:
+- Domain-specific DistilRoberta classifiers prompt-tuned for math deduction, STEM reasoning, code interleaved with prose.
+- Custom HTML extraction because code/math token distributions are wildly different from prose.
+
+**7. Multilingual.**
+- fastText language ID across 176 languages.
+- Per-language doc-level and line-level dedup.
+- Multilingual Llama 2 quality classifier for ranking.
+- Final multilingual fraction set experimentally — balancing English vs. multilingual benchmarks.
+
+The recurring pattern: **frontier labs use their previous model to grade data for the next one.** Quality classifiers trained on LLM judgments now beat hand-tuned heuristics.
+
+### The neutral-vs-aggressive filtering debate
+
+Two camps with strong results:
+- **RefinedWeb camp:** aggressive dedup + minimal ML filtering. The argument: ML classifiers amplify biases toward "Wikipedia-like" text and shrink the diversity of representations.
+- **DCLM camp:** a well-trained classifier can extract Llama 3-equivalent quality from 6× fewer tokens.
+
+Frontier labs use both — heavy classifier filtering on web, plus diversity-preserving choices on code and multilingual.
+
+---
+
+## Determining the Data Mix
+
+Curating clean tokens is half the problem. The other half is deciding what fraction of training comes from where.
+
+### Knowledge classification + scaling-law experiments
+
+Llama 3's recipe:
+
+1. **Build a knowledge classifier** to categorize web data into topics. Use it to downsample over-represented categories (arts & entertainment dominates the web).
+2. **Run scaling-law experiments on candidate mixes.** Train several small models on a mix, predict large-model performance, iterate. Pick the best mix.
+
+### The Llama 3 final mix
+
+| Category | Fraction |
+|---|---|
+| General knowledge | ~50% |
+| Math & reasoning | ~25% |
+| Code | ~17% |
+| Multilingual | ~8% |
+
+**Why so much code?** This is one of the more important findings of the modern era: training on more code improves performance on *non-code* reasoning. The hypothesis is that code has rigid logical structure — if/else, loops, function composition — that teaches structured thinking. [Gunasekar et al. (2023)](https://arxiv.org/abs/2306.11644) (the Phi paper) showed that "textbook-quality" code data alone produces surprisingly capable small models.
+
+**Why only 8% multilingual?** Trade-off: more multilingual data helps non-English benchmarks but slightly hurts English. The exact fraction is tuned by ablation.
+
+### Automatic domain weighting
+
+[DoReMi (Xie et al., 2023)](https://arxiv.org/abs/2305.10429): train a reference model, then a second model that upweights domains where the first model struggled most. Domain weights produced this way beat hand-tuned ratios.
+
+This is becoming standard: the data mix is itself a hyperparameter optimized by small-scale experiments before the big run.
+
+---
+
+## Sizing the Model: Scaling Laws
+
+Scaling laws are perhaps the most practically important discovery in modern AI: they tell you **how to spend your compute budget**.
+
+### Kaplan et al. (2020): The First Laws
+
+[Kaplan et al. (2020)](https://arxiv.org/abs/2001.08361) at OpenAI discovered LLM performance follows clean power laws:
+
+$$L(N) \approx \left(\frac{N_c}{N}\right)^{\alpha_N}, \quad L(D) \approx \left(\frac{D_c}{D}\right)^{\alpha_D}$$
+
+with $\alpha_N \approx 0.076$, $\alpha_D \approx 0.095$. Their (eventually wrong) conclusion: **model size matters more than data**. Recommendation: for a fixed budget, build a big model and train it briefly.
+
+This led to GPT-3 (175B) on only 300B tokens — a 1.7:1 token-to-parameter ratio.
+
+### Chinchilla (2022): The Correction
+
+[Hoffmann et al. (2022)](https://arxiv.org/abs/2203.15556) at DeepMind showed Kaplan was wrong: his experiments didn't vary the LR schedule length with the training budget, causing larger models to be under-trained.
+
+Chinchilla's finding: **parameters and tokens should scale equally.** Compute-optimal training wants ~20 tokens per parameter. Chinchilla 70B on 1.4T tokens beat 280B Gopher on 300B tokens.
+
+$$L(N, D) \approx E + \frac{A}{N^{\alpha}} + \frac{B}{D^{\beta}}, \quad N_{\text{opt}} \propto C^{0.5}, \quad D_{\text{opt}} \propto C^{0.5}$$
+
+Both grow as $\sqrt{C}$ — they should grow in lockstep.
+
+### Over-training: the new optimum
+
+Chinchilla optimizes *training* compute. In production, you also pay *inference* cost, which scales with model size $N$ but not training tokens $D$.
+
+The Llama philosophy ([Touvron et al., 2023](https://arxiv.org/abs/2302.13971)): train smaller models on **far** more tokens than Chinchilla-optimal. Llama 3 8B was trained on 15T tokens — a **1875:1** ratio, nearly 100× the Chinchilla optimum.
+
+The extra training compute is a one-time cost; the inference savings are perpetual. For any model that will serve many requests, you should over-train.
+
+### The modern two-step law (Llama 3)
+
+Standard Chinchilla predicts *loss*, not benchmark accuracy. Meta's Llama 3 paper extends the framework so you can predict *downstream task performance* from compute, four orders of magnitude in advance.
+
+**Step 1 — sweep.** Train models across compute budgets $6\times 10^{18}$ to $10^{22}$ FLOPs, sizes 40M to 16B. Cosine schedule, 2000-step warmup, peak LR 2e-4 to 4e-4. Plot IsoFLOPs curves (loss vs. tokens, one per budget), fit parabolas, find the minimum at each budget = "compute-optimal model."
+
+**Step 2 — extrapolate.** Fit a power law on the compute-optimal points: $N^\star(C) = A \cdot C^\alpha$. They got $(\alpha, A) = (0.53, 0.29)$. Extrapolating to $3.8 \times 10^{25}$ FLOPs (the 405B budget) predicts: train a **402B model on 16.55T tokens**.
+
+**Step 3 — predict accuracy from loss.** Two correlations stacked:
+1. Linear: normalized NLL on a benchmark ↔ training FLOPs (over scaling-law models).
+2. Sigmoidal: NLL ↔ accuracy (using both scaling-law models *and* the Llama 2 family).
+
+This chain predicted Llama 3 405B's ARC Challenge accuracy to within a couple of points — across four orders of magnitude in compute. This is now the standard at frontier labs.
+
+---
+
+## The Mechanics
+
+### Batch Size
+
+LLM batches are measured in **tokens per batch**, not sequences. A 4M-token batch could be 1000 × 4096-token sequences or 500 × 8192. What matters is total tokens, since each token contributes a training signal.
+
+There's a concept called the **critical batch size**: below it, doubling the batch roughly halves the training steps needed (same total compute). Above it, gradients are already so well-averaged that bigger batches waste compute. Critical batch size *grows* as the model gets better — gradients become more correlated, so you need more independent samples per step.
+
+This is why training runs use **batch-size warmup**: start small, ramp up. GPT-3 ramped from 32K to 3.2M tokens per batch over the first 12B tokens. Llama 3 405B did 4M → 8M (after 252M tokens) → 16M (after 2.87T tokens).
+
+### Gradient Accumulation
+
+A 16M-token batch doesn't fit in any single GPU. **Gradient accumulation** splits the batch into micro-batches: forward each, accumulate gradients, take one optimizer step.
+
+```
+Effective batch = micro_batch_size × num_GPUs × accumulation_steps
+```
+
+Mathematically identical to one big batch, but only one micro-batch's activations are in memory at a time.
+
+### Sequence Packing
+
+Training documents vary wildly — a tweet might be 20 tokens, a paper 15K. Padding every sequence to context length wastes compute. **Sequence packing** concatenates documents into a single context window separated by EOS:
+
+```
+[BOS] doc1 [EOS] [BOS] doc2 [EOS] [BOS] doc3... [EOS] [PAD] [PAD]
+```
+
+Critical detail: a **block-diagonal attention mask** must prevent cross-document attention. Document 2 token 5 should not attend to document 1 token 3 — they're unrelated. (Llama 3 found this mask had limited effect during standard pre-training but was **crucial** during long-context training.)
+
+Without packing, GPU utilization drops to 50–70%. With packing, almost every token in every batch contributes to the loss.
+
+### Learning Rate Schedule
+
+Standard frontier recipe: linear warmup → cosine decay to ~10% of peak. Llama 3 405B: peak 8e-5, 8000-step linear warmup, cosine decay to 8e-7 over 1.2M steps.
+
+Some labs prefer **WSD** (Warmup-Stable-Decay): constant LR after warmup, then a sharp decay at the end. Easier to extend a run without rewinding the schedule.
+
+---
+
+## The Three Phases of Pre-Training Itself
+
+Here's the part of pre-training that's often glossed over. A modern pre-training run isn't one monolithic process — it has three distinct phases, each with different objectives, data, and hyperparameters.
+
+### Phase 1: Initial Pre-Training (the bulk)
+
+This is what most people picture when they think "pre-training." Train at a fixed short context (4K–8K) on the bulk of the data for the vast majority of compute.
+
+**Llama 3 405B Phase 1:**
+- AdamW, peak LR 8e-5, cosine schedule
+- Batch schedule: 4M → 8M (at 252M tokens) → 16M (at 2.87T tokens), sequences 4096 then 8192
+- 1.2M optimizer steps total
+- Data mix tweaks *during* training: bumped non-English share, upsampled math, added recent web data near the end (to push knowledge cutoff), downsampled subsets later identified as low-quality
+- "Very stable — few loss spikes, no divergence interventions"
+
+Short context for Phase 1 is non-negotiable: attention is $O(n^2)$ in sequence length, so training at 128K from the start would be prohibitive. You want to spend almost all of your compute at the cheapest context length.
+
+### Phase 2: Long-Context Extension
+
+After Phase 1 you have a strong base model that thinks 8K tokens at a time. To support 128K-context inference, you extend the context in **progressive stages**, training a small amount at each stage until the model adapts.
+
+**Why progressive?** Jumping straight from 8K to 128K destabilizes attention — the RoPE position encodings were never seen at the new lengths and produce out-of-distribution rotations. Stepping up gradually lets the model adapt at each new length.
+
+**The position encoding problem.** Llama 3 uses RoPE (Rotary Position Embeddings) with base frequency $\theta = 500{,}000$ (vs. the original 10K) — high $\theta$ slows the rotation, allowing distinguishable positions much further apart. Three techniques can extend a RoPE model further:
+
+- **Position Interpolation** ([Chen et al., 2023](https://arxiv.org/abs/2306.15595)): Scale position indices down. If trained at 4K and extending to 16K, divide all positions by 4. Simple, effective, but loses short-range resolution.
+- **NTK-aware scaling**: Modify the base frequency $\theta$ instead. Preserves short-range resolution while extending long-range.
+- **YaRN** ([Peng et al., 2023](https://arxiv.org/abs/2309.00071)): Combines NTK-aware scaling with attention-logit temperature and **per-frequency-band scaling** — high-frequency components (local positions) stay sharp, low-frequency components (distant positions) get stretched. Most sophisticated; used by many modern models.
+
+**Llama 3's Phase 2.** Context grown in **6 stages** from 8K → 128K. Advance to next stage only when (a) short-context benchmarks fully recover and (b) "needle-in-a-haystack" tests solve perfectly at the current length. Total ~800B tokens for this phase.
+
+This is also where the document-aware attention mask becomes essential — without it, document boundaries within packed long sequences leak attention and degrade quality.
+
+### Phase 3: Annealing
+
+The final phase. Linearly decay the learning rate to zero on a small amount of high-quality data.
+
+**Llama 3 405B Phase 3:**
+- Final **40M tokens** only
+- LR linearly annealed to 0
+- Context held at 128K
+- Data mix upsamples highest-quality sources (curated math, code, knowledge)
+- No benchmark training sets included (preserve honest eval)
+- **Polyak-averaged checkpoints** during annealing → final base model
+
+**Why annealing works.** At low learning rate, the model is making small precise adjustments rather than large noisy updates. Showing it high-quality data here "locks in" the patterns from those domains. Llama 3 measured:
+- On 8B: annealing on GSM8k/MATH boosted validation by +24.0% and +6.4%.
+- On 405B: negligible — the flagship already had the capabilities.
+
+The smaller the model, the more annealing matters. For the 405B, annealing functions more as a smoothing step than a capability injection.
+
+**Bonus use:** Llama 3 also uses annealing as a *dataset evaluator* — take a 50%-trained 8B, anneal LR to 0 on 40B tokens with 30% candidate dataset + 70% default mix. Faster than a full scaling-law experiment for judging new data sources.
+
+---
+
+## Training Dynamics: What Happens During Training
+
+### The Loss Curve
+
+A typical run has distinct phases:
+
+1. **Rapid initial descent** (~first 1%): Loss drops from ~10 ($\log |V|$ for random) to ~4–5. The model learns token frequencies and basic bigrams.
+2. **Steady power-law decay** (the bulk): Smooth power law as knowledge accumulates. Grammar, facts, reasoning patterns.
+3. **Annealing dip** (if used): Final drop as LR approaches zero and data quality rises.
+
+**Loss spikes** interrupt smooth curves — sudden jumps then recovery. Caused by bad data batches, numerical instability, or LR–batch interactions. Standard recovery: rewind to a checkpoint before the spike, skip the offending data. Llama 3 405B famously had **almost none** — they credit careful data pipeline + their batch-size schedule.
+
+### When Do Capabilities Emerge?
+
+Different capabilities develop at different loss thresholds:
+
+- **Early** (loss > 4): Basic token statistics, bigrams, rudimentary grammar.
+- **Mid** (loss 3–4): Sentence formation, topic coherence, basic factual recall.
+- **Late** (loss 2–3): Complex reasoning, rare facts, multi-step math, code, instruction following. Many appear to "emerge" sharply at specific thresholds.
+
+[Wei et al. (2022)](https://arxiv.org/abs/2206.07682) documented capabilities that appear discontinuously with scale. [Schaeffer et al. (2023)](https://arxiv.org/abs/2304.15004) argued emergence is often a metric artifact — measure log-probability of the right answer (continuous) instead of exact-match (discrete) and the curves smooth out. Truth is probably both: gradual capability improvement with sharp transitions in *downstream task metrics*.
+
+### Grokking and Phase Transitions
+
+[Grokking](https://arxiv.org/abs/2201.02177) (Power et al., 2022): a model achieves perfect training accuracy early, but generalization doesn't improve until much later — sometimes orders of magnitude more steps. The model memorizes first, then discovers the underlying algorithm.
+
+Observed in LLM training too, though less dramatically. **Loss plateaus** followed by sudden drops are likely the model searching circuit space — unable to improve with its current computational strategy until it discovers a more efficient one.
+
+---
+
+## A Complete Recipe: Llama 3 405B as Worked Example
+
+To make all of this concrete, here is the full Llama 3 405B pre-training recipe in one place:
+
+| | |
+|---|---|
+| **Compute budget** | 3.8 × 10²⁵ FLOPs |
+| **Hardware** | 16,000 H100 GPUs (Meta Grand Teton servers, NVLink intra-node, RoCE inter-node) |
+| **Parallelism** | 4D: TP=8, CP=1→16, PP=16, DP=FSDP. MFU 38–43% in BF16. |
+| **Total tokens** | ~15.6T |
+| **Architecture** | 126 layers, dim 16,384, FFN 53,248, 128 heads, 8 KV heads (GQA), vocab 128K, RoPE θ=500,000 |
+| **Optimizer** | AdamW |
+| **Peak LR** | 8 × 10⁻⁵ |
+| **Schedule** | Linear warmup 8000 steps → cosine decay to 8 × 10⁻⁷ over 1.2M steps |
+| **Batch schedule** | 4M tokens (seq 4096) → 8M (seq 8192) at 252M tokens → 16M at 2.87T tokens |
+| **Data mix** | 50% general knowledge / 25% math+reasoning / 17% code / 8% multilingual |
+| **Phase 1: Initial PT** | Bulk of training at 8K context, batch ramped, ~14T tokens |
+| **Phase 2: Long context** | 6 progressive stages 8K→128K, ~800B tokens, document-aware mask + context parallelism |
+| **Phase 3: Annealing** | Final 40M tokens, LR→0, upsample quality data, Polyak averaging |
+| **Reliability** | >90% effective training time. 466 interruptions over 54 days, 78% hardware-related. |
+
+This is what a 2026 frontier pre-training run looks like end to end. The objective hasn't changed since GPT-1 — predict the next token. Everything around it has evolved enormously, and the remaining posts in this series cover the systems that make it possible (distributed training, numerics) and what happens after (SFT, RLHF, DPO, reasoning).
+
+---
+
+## References
+
+- **[Language Models are Unsupervised Multitask Learners](https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf)** (Radford et al., 2019) — GPT-2.
+- **[Scaling Laws for Neural Language Models](https://arxiv.org/abs/2001.08361)** (Kaplan et al., 2020) — First scaling laws.
+- **[Training Compute-Optimal Large Language Models](https://arxiv.org/abs/2203.15556)** (Hoffmann et al., 2022) — Chinchilla.
+- **[LLaMA: Open and Efficient Foundation Language Models](https://arxiv.org/abs/2302.13971)** (Touvron et al., 2023) — Over-training philosophy.
+- **[The Llama 3 Herd of Models](https://arxiv.org/abs/2407.21783)** (Meta, 2024) — Modern pre-training recipe at scale.
+- **[Efficient Training of Language Models to Fill in the Middle](https://arxiv.org/abs/2207.14255)** (Bavarian et al., 2022) — FIM.
+- **[Better & Faster Large Language Models via Multi-token Prediction](https://arxiv.org/abs/2404.19737)** (Gloeckle et al., 2024) — Multi-token prediction.
+- **[Scheduled Sampling for Sequence Prediction](https://arxiv.org/abs/1506.03099)** (Bengio et al., 2015) — Exposure bias.
+- **[Language Modeling Is Compression](https://arxiv.org/abs/2309.10668)** (Delétang et al., 2023) — Prediction-compression equivalence.
+- **[DoReMi: Optimizing Data Mixtures Speeds Up Language Model Pretraining](https://arxiv.org/abs/2305.10429)** (Xie et al., 2023) — Domain weight optimization.
+- **[Emergent Abilities of Large Language Models](https://arxiv.org/abs/2206.07682)** (Wei et al., 2022) — Emergent capabilities.
+- **[Are Emergent Abilities of Large Language Models a Mirage?](https://arxiv.org/abs/2304.15004)** (Schaeffer et al., 2023) — Counter-argument.
+- **[Grokking](https://arxiv.org/abs/2201.02177)** (Power et al., 2022) — Grokking phenomenon.
+- **[The Pile](https://arxiv.org/abs/2101.00027)** (Gao et al., 2020) — Diverse pre-training dataset.
+- **[FineWeb](https://arxiv.org/abs/2406.17557)** (Penedo et al., 2024) — HuggingFace's 15T dataset.
+- **[Scaling Language Models with Retrieval-Augmented LM Pretraining](https://arxiv.org/abs/2112.11446)** (Rae et al., 2021) — Gopher quality heuristics.
+- **[UL2: Unifying Language Learning Paradigms](https://arxiv.org/abs/2205.05131)** (Tay et al., 2022) — Mixture of denoisers.
+- **[Extending Context Window of Large Language Models via Positional Interpolation](https://arxiv.org/abs/2306.15595)** (Chen et al., 2023) — Position interpolation.
+- **[YaRN: Efficient Context Window Extension](https://arxiv.org/abs/2309.00071)** (Peng et al., 2023) — Context extension.
+- **[Textbooks Are All You Need](https://arxiv.org/abs/2306.11644)** (Gunasekar et al., 2023) — Phi / code-for-reasoning.
+
+---
+
+*Next up: [Distributed Training: Making It Fit](/blog/distributed-training) — how to train a model that doesn't fit on one GPU.*
+
+---
+
+*Found this useful? The full series: [The Loss Landscape of LLM Training](/blog)*

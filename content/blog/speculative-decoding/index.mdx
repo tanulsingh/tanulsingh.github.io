@@ -1,0 +1,35 @@
+---
+title: "Speculative Decoding: Parallel Generation"
+date: "2026-07-30"
+tags: ["LLM Inference", "Speculative Decoding", "Medusa", "EAGLE", "The Inference Engine"]
+author: "Tanul Singh"
+description: "Breaking the sequential bottleneck — draft models, self-speculative decoding, Medusa, EAGLE, lookahead decoding, tree attention, and when speculation helps vs hurts."
+summary: "Autoregressive generation is inherently sequential — or is it? Speculative decoding uses a cheap draft model to guess multiple tokens, then verifies them in parallel with the large model. This post covers every variant: draft models, Medusa, EAGLE, lookahead decoding, and tree attention."
+featured: true
+draft: true
+---
+
+*This is Part 6 of [**The Inference Engine**](/blog) — a series covering how transformers serve predictions at scale.*
+
+*Previously: [Quantization for Inference](/blog/inference-quantization)*
+
+---
+
+## Coming Soon
+
+Topics to cover:
+- Core idea: draft model + verification
+- Self-speculative decoding (layer skipping)
+- Medusa (multi-head prediction)
+- EAGLE / EAGLE-2
+- Lookahead decoding
+- Tree attention for verification
+- When speculative decoding helps vs hurts
+
+---
+
+*Next up: [Hardware, Kernels, and Systems](/blog/inference-hardware)*
+
+---
+
+*Found this useful? The full series: [The Inference Engine](/blog)*

@@ -8,7 +8,7 @@ summary: "The complete story of KV cache optimization: Multi-Query Attention, Gr
 featured: true
 ---
 
-*This is Part 5 of **The Gradient Descent through Transformers** — a series where I walk through every component of the modern transformer stack, how it evolved from 2017 to 2026, and why each piece matters.*
+*This is Part 5 of [**The Gradient Descent through Transformers**](/blog) — a series where I walk through every component of the modern transformer stack, how it evolved from 2017 to 2026, and why each piece matters.*
 
 *Previously: [Attention Part 1 — The Mechanism That Changed Everything](/blog/attention-mechanisms)*
 
@@ -21,7 +21,7 @@ This post traces how the field solved that problem — not by changing the hardw
 1. **The head-sharing lineage**: MQA (2019) → GQA (2023) → CLA (2024) → MLA (2024) — reducing memory by sharing or compressing KV across heads and layers
 2. **The sparsity lineage**: Sparse Transformer (2019) → Sliding Window (2020/2023) → Global+Local Hybrid (2025) — reducing compute by limiting which token pairs interact
 
-These threads eventually converge in 2024-2025 with mechanisms like Native Sparse Attention that combine both ideas. Let's trace the full history.
+These threads eventually converge in 2024-2025 with newer hybrid mechanisms that combine both ideas. Let's trace the full history.
 
 ## The Two Costs, Quantified
 
@@ -324,7 +324,7 @@ Even with MLA's compressed cache, the attention computation itself is still $O(n
 
 The next generation of innovations attacks this directly: **what if most tokens don't need to attend to most other tokens?** Sparse attention patterns — sliding windows, global/local hybrids, learned routing — can reduce the quadratic cost to near-linear, without fundamentally changing the attention mechanism.
 
-That's the subject of [Part 3: The Sparsity Lineage](/blog/attention-sparsity) — from Sparse Transformer's fixed patterns (2019) to Mistral's sliding window, Gemma 3's hybrid layers, and DeepSeek's learned Native Sparse Attention.
+That's the subject of [Part 3: The Sparsity Lineage](/blog/attention-sparsity) — from Sparse Transformer's fixed patterns (2019) to Mistral's sliding window and Gemma 3's hybrid layers.
 
 ---
 
