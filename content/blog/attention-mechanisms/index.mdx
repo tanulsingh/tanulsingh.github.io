@@ -8,7 +8,7 @@ summary: "A first-principles walkthrough of self-attention: from the intuition o
 featured: true
 ---
 
-*This is Part 4 of **The Gradient Descent through Transformers** — a series where I walk through every component of the modern transformer stack, how it evolved from 2017 to 2026, and why each piece matters.*
+*This is Part 4 of [**The Gradient Descent through Transformers**](/blog) — a series where I walk through every component of the modern transformer stack, how it evolved from 2017 to 2026, and why each piece matters.*
 
 *Previously: [Positional Encoding Part 2 — RoPE, ALiBi, and the Quest for Length Generalization](/blog/positional-encoding-relative)*
 
@@ -480,7 +480,7 @@ These approaches redesign the attention mechanism itself to reduce memory and co
 - **Multi-Query & Grouped-Query Attention (MQA/GQA)** — share K, V heads across query heads to shrink the KV cache by 8-32x
 - **Sliding Window & Sparse Attention** — limit which token pairs can interact, breaking the quadratic cost for long sequences
 - **Multi-Latent Attention (MLA)** — compress KV into low-rank latent vectors (DeepSeek's radical approach)
-- **Differential Attention & Native Sparse Attention** — the newest (2024-2025) innovations that learn what to attend to and what to ignore
+- **Differential Attention** — the newest (2024-2025) innovation that learns what to attend to and what to ignore
 
 These change the math. A model using GQA computes a fundamentally different operation than vanilla multi-head attention — it just happens to approximate the same result with far less memory.
 

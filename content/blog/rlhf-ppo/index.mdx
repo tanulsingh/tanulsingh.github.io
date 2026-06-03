@@ -1,0 +1,37 @@
+---
+title: "RLHF: Reward Models and PPO"
+date: "2026-06-15"
+tags: ["LLM Training", "RLHF", "PPO", "Reward Model", "Alignment", "The Loss Landscape of LLM Training"]
+author: "Tanul Singh"
+description: "The classical alignment pipeline dissected — from human preference collection through Bradley-Terry reward modeling to PPO optimization, including failure modes, infrastructure challenges, and why this is so hard to get right."
+summary: "SFT makes a model follow instructions. RLHF makes it follow them well. This post covers the full pipeline: collecting human preferences, training reward models (and fighting reward hacking), PPO with KL penalties, and the practical nightmares of keeping 4 models in memory while training stays stable."
+featured: true
+draft: true
+---
+
+*This is Part 6 of [**The Loss Landscape of LLM Training**](/blog) — a series covering everything from pre-training through fine-tuning to alignment.*
+
+*Previously: [Fine-Tuning II: SFT, Quantization, and Model Merging](/blog/sft-quantization)*
+
+---
+
+## Coming Soon
+
+Topics to cover:
+- Why SFT alone is insufficient
+- Human preference collection (pairwise rankings)
+- Bradley-Terry model, reward model training
+- Reward hacking, overoptimization, Goodhart's Law
+- PPO: clipped objective, value function, GAE, KL penalty
+- Process vs Outcome reward models
+- Rejection sampling / Best-of-N / RAFT
+- Infrastructure challenges (4 models in memory)
+- Failure modes (mode collapse, sycophancy, verbosity)
+
+---
+
+*Next up: [DPO, GRPO, and Modern Alignment](/blog/dpo-grpo-alignment)*
+
+---
+
+*Found this useful? The full series: [The Loss Landscape of LLM Training](/blog)*

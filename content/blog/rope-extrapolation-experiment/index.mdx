@@ -1,14 +1,17 @@
 ---
-title: "Why Every LLM Uses RoPE (Even When It Doesn't Extrapolate)"
+title: "My experiments with RoPE"
 date: "2026-05-22"
 tags: ["Transformers", "Positional Encoding", "RoPE", "ALiBi", "Experiment", "Lab Notes"]
 author: "Tanul Singh"
 description: "I built a toy experiment to compare positional encoding methods, expecting to confirm what the textbooks say. The result surprised me — and led me through a series of follow-up experiments, a research paper that confirmed what I was seeing, and the chronological evolution of how the field has been quietly fixing the problem for years."
 summary: "Vanilla RoPE doesn't extrapolate cleanly to sequences longer than its training context. ALiBi does. Yet every production LLM uses RoPE plus an extension trick like YaRN. This is the story of how I discovered that, traced its consequences experimentally, and reconciled it with what production models actually do."
+coverImage: "/images/blog/rope-extrapolation-experiment/01_first_surprise.png"
+coverAlt: "Length generalization across positional encoding methods — ALiBi flat, RoPE degrading, absolute methods collapsing"
+coverCaption: "An experiment that broke my faith in RoPE's length generalization."
 featured: true
 ---
 
-*A companion experiment to my [**Positional Encoding** posts](/blog/positional-encoding-relative) in **The Gradient Descent through Transformers** series. Lab notes — what happens when a fifteen-minute confirmation experiment refuses to confirm.*
+*A companion experiment to my [**Positional Encoding** posts](/blog/positional-encoding-relative) in [**The Gradient Descent through Transformers**](/blog) series. Lab notes — what happens when a fifteen-minute confirmation experiment refuses to confirm.*
 
 ---
 

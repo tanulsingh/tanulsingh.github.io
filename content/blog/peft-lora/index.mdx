@@ -1,0 +1,37 @@
+---
+title: "Fine-Tuning I: LoRA, Adapters, and All Things PEFT"
+date: "2026-06-05"
+tags: ["LLM Training", "LoRA", "PEFT", "Fine-tuning", "Adapters", "The Loss Landscape of LLM Training"]
+author: "Tanul Singh"
+description: "Every parameter-efficient fine-tuning method explained from first principles — LoRA and its 15+ variants, adapters, prompt tuning, prefix tuning, and how to choose between them."
+summary: "You have a 70B model and want to adapt it. Full fine-tuning costs a fortune. This post covers every PEFT method: LoRA's low-rank insight and its explosion of variants (QLoRA, DoRA, AdaLoRA, VeRA, GaLore), adapter architectures, prompt/prefix tuning, and a decision framework for when to use what."
+featured: true
+draft: true
+---
+
+*This is Part 4 of [**The Loss Landscape of LLM Training**](/blog) — a series covering everything from pre-training through fine-tuning to alignment.*
+
+*Previously: [The Numerics: Precision, Optimizers, and Stability](/blog/training-numerics)*
+
+---
+
+## Coming Soon
+
+Topics to cover:
+- Why fine-tune? (base model → useful model gap)
+- Full fine-tuning (LR selection, layer-wise decay, gradual unfreezing)
+- **LoRA deep dive**: math, rank selection, which modules, alpha scaling, initialization
+- LoRA variants: QLoRA, LoRA+, rsLoRA, DoRA, AdaLoRA, LoRA-FA, VeRA, GaLore, PiSSA, LoftQ
+- Adapters (Houlsby, Pfeiffer, parallel)
+- Prompt tuning, prefix tuning, P-tuning v1/v2
+- IA3, BitFit, LLaMA-Adapter
+- PEFT method selection criteria (when to use what)
+- Composing/stacking multiple LoRAs, S-LoRA serving
+
+---
+
+*Next up: [Fine-Tuning II: SFT, Quantization, and Model Merging](/blog/sft-quantization)*
+
+---
+
+*Found this useful? The full series: [The Loss Landscape of LLM Training](/blog)*

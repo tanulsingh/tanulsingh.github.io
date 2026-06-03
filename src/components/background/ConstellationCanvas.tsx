@@ -347,7 +347,7 @@ export function ConstellationCanvas() {
   return (
     <canvas
       ref={canvasRef}
-      className="fixed inset-0 z-0 pointer-events-none"
+      className="constellation-canvas fixed inset-0 z-0 pointer-events-none"
       aria-hidden="true"
     />
   );

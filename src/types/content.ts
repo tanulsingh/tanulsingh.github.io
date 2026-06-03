@@ -6,6 +6,7 @@ export interface PostFrontmatter {
   summary: string;
   coverImage?: string;
   coverAlt?: string;
+  coverCaption?: string;
   featured?: boolean;
   draft?: boolean;
   author?: string;

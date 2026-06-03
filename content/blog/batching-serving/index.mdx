@@ -1,0 +1,34 @@
+---
+title: "Batching, Scheduling, and Serving"
+date: "2026-07-20"
+tags: ["LLM Inference", "Continuous Batching", "vLLM", "Serving", "The Inference Engine"]
+author: "Tanul Singh"
+description: "How serving systems handle many concurrent requests — static vs continuous batching, iteration-level scheduling, preemption, and a comparison of vLLM, TensorRT-LLM, SGLang, and TGI."
+summary: "One request is simple. Thousands concurrent is hard. This post covers the evolution from static batching to continuous batching (Orca), iteration-level scheduling, preemption strategies, and compares the major serving frameworks — vLLM, TensorRT-LLM, SGLang, TGI, and llama.cpp."
+featured: true
+draft: true
+---
+
+*This is Part 4 of [**The Inference Engine**](/blog) — a series covering how transformers serve predictions at scale.*
+
+*Previously: [The KV Cache: Memory, Paging, and Compression](/blog/kv-cache)*
+
+---
+
+## Coming Soon
+
+Topics to cover:
+- Static batching → continuous batching (Orca)
+- Iteration-level scheduling, preemption
+- Request prioritization, SLA-aware scheduling
+- Serving frameworks: vLLM, TensorRT-LLM, SGLang, TGI, llama.cpp
+- Multi-GPU inference (tensor parallel, pipeline parallel)
+- Streaming, stop sequences, backpressure
+
+---
+
+*Next up: [Quantization for Inference](/blog/inference-quantization)*
+
+---
+
+*Found this useful? The full series: [The Inference Engine](/blog)*

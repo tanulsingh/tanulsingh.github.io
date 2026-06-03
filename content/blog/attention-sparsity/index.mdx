@@ -4,11 +4,11 @@ date: "2026-05-12"
 tags: ["Transformers", "NLP", "Attention", "Sparse Attention", "Flash Attention", "The Gradient Descent through Transformers"]
 author: "Tanul Singh"
 description: "How the field attacked attention's quadratic compute cost — from fixed sparse patterns to sliding windows, global/local hybrids, noise cancellation, and learned sparsity. The evolution from O(n²) toward linear attention."
-summary: "The complete story of sparse attention: Sparse Transformer's fixed patterns, Mistral's sliding window, Gemma 3's hybrid layers, and DeepSeek's Native Sparse Attention. How each technique trades off compute, quality, and implementation complexity."
+summary: "The complete story of sparse attention: Sparse Transformer's fixed patterns, Mistral's sliding window, and Gemma 3's hybrid layers. How each technique trades off compute, quality, and implementation complexity."
 featured: true
 ---
 
-*This is Part 6 of **The Gradient Descent through Transformers** — a series where I walk through every component of the modern transformer stack, how it evolved from 2017 to 2026, and why each piece matters.*
+*This is Part 6 of [**The Gradient Descent through Transformers**](/blog) — a series where I walk through every component of the modern transformer stack, how it evolved from 2017 to 2026, and why each piece matters.*
 
 *Previously: [Attention Part 2 — The Sharing Lineage](/blog/attention-architectures)*
 
@@ -193,7 +193,7 @@ Sparse Transformer proved three foundational ideas:
 2. Factorized patterns with $O(\sqrt{n})$ connections per layer can maintain full connectivity via multi-hop
 3. Information can route through "relay" positions — not every token needs direct access to every other token
 
-These ideas echo through everything that followed: sliding window's receptive field growth across layers is essentially the same multi-hop insight, and NSA's compressed global tokens are a learned version of fixed pattern's summary positions.
+These ideas echo through everything that followed: sliding window's receptive field growth across layers is essentially the same multi-hop insight.
 
 ### Why It Didn't Dominate
 
@@ -386,15 +386,7 @@ The pattern is clear: the best architectures of 2025 are those that combine comp
 
 ### The Natural Question: How Do You Design Learned Sparse Attention?
 
-All of these hybrid approaches share a common thread: they don't just use *fixed* patterns (like Sparse Transformer's strided/fixed) or *simple* heuristics (like sliding window's locality assumption). They use **learned routing** — letting the model itself decide which tokens matter for each query.
-
-This idea was formalized most cleanly in **Native Sparse Attention (NSA)** by DeepSeek (2025). NSA combines three paths — compressed global context, learned token selection, and sliding window — into a single hardware-efficient mechanism. It's arguably the blueprint that the models above are all iterating on.
-
-We'll dissect NSA in full detail — the compression module, the routing mechanism, the hardware-aligned design, and why it works so well — in a dedicated paper explanation.
-
-<Callout type="info">
-**Deep dive available:** [Native Sparse Attention: Hardware-Aligned Learned Sparsity →](/papers/native-sparse-attention) — the full paper dissection with code implementations.
-</Callout>
+All of these hybrid approaches share a common thread: they don't just use *fixed* patterns (like Sparse Transformer's strided/fixed) or *simple* heuristics (like sliding window's locality assumption). The frontier is moving toward **learned routing** — letting the model itself decide which tokens matter for each query — but how to do that cleanly is still an open question, and one I'll come back to in a future post.
 
 ---
 
@@ -418,7 +410,6 @@ This is a fundamentally different kind of optimization: not changing *what* we c
 - **[Longformer: The Long-Document Transformer](https://arxiv.org/abs/2004.05150)** (Beltagy et al., 2020) — Global + local attention for long documents.
 - **[Mistral 7B](https://arxiv.org/abs/2310.06825)** (Jiang et al., 2023) — Popularized sliding window for decoder-only LLMs.
 - **[Gemma 3](https://arxiv.org/abs/2503.19786)** (Google DeepMind, 2025) — Clean global/local hybrid design.
-- **[Native Sparse Attention](https://arxiv.org/abs/2502.11089)** (DeepSeek, 2025) — Learned hierarchical sparsity with hardware alignment.
 
 ---
 

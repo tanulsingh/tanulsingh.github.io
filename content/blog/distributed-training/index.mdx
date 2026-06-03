@@ -1,0 +1,38 @@
+---
+title: "Distributed Training: Making It Fit"
+date: "2026-05-25"
+tags: ["LLM Training", "Distributed Systems", "FSDP", "Tensor Parallelism", "Pipeline Parallelism", "The Loss Landscape of LLM Training"]
+author: "Tanul Singh"
+description: "How to train a model that doesn't fit on one GPU — data parallelism, tensor parallelism, pipeline parallelism, ZeRO, FSDP, and the 3D recipes used by Llama and DeepSeek."
+summary: "A 400B parameter model needs 800GB just for weights in FP16. This post breaks down every parallelism strategy — what's sharded, what's replicated, what's communicated — and how frontier labs combine them into 3D/5D recipes that train across thousands of GPUs."
+featured: true
+draft: true
+---
+
+*This is Part 2 of [**The Loss Landscape of LLM Training**](/blog) — a series covering everything from pre-training through fine-tuning to alignment.*
+
+*Previously: [Pre-Training: Teaching a Model to Predict](/blog/llm-pretraining)*
+
+---
+
+## Coming Soon
+
+Topics to cover:
+- Memory arithmetic (params + grads + optimizer states + activations)
+- Data Parallelism → DDP → ZeRO (1/2/3) → FSDP/FSDP2
+- Tensor Parallelism (Megatron column/row splits)
+- Pipeline Parallelism (GPipe, 1F1B, zero-bubble)
+- Sequence/Context Parallelism (Ring Attention)
+- 3D/5D parallelism recipes
+- Communication primitives and overlap
+- Gradient checkpointing / activation recomputation
+- CPU/NVMe offloading
+- Fault tolerance, async checkpointing
+
+---
+
+*Next up: [The Numerics: Precision, Optimizers, and Stability](/blog/training-numerics)*
+
+---
+
+*Found this useful? The full series: [The Loss Landscape of LLM Training](/blog)*

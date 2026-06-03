@@ -1,0 +1,35 @@
+---
+title: "Quantization for Inference"
+date: "2026-07-25"
+tags: ["LLM Inference", "Quantization", "GPTQ", "AWQ", "GGUF", "The Inference Engine"]
+author: "Tanul Singh"
+description: "Making models smaller and faster — weight-only vs activation quantization, INT4/NF4/FP8 formats, GPTQ, AWQ, SmoothQuant, GGUF, pruning, and the quality-latency-cost tradeoff."
+summary: "A 70B model in FP16 needs 140GB. In INT4 it needs 35GB — fits on a single GPU. This post covers quantization from fundamentals (symmetric, asymmetric, per-group) through every major method (GPTQ, AWQ, GGUF, AQLM), plus pruning and the quality-cost tradeoffs that matter."
+featured: true
+draft: true
+---
+
+*This is Part 5 of [**The Inference Engine**](/blog) — a series covering how transformers serve predictions at scale.*
+
+*Previously: [Batching, Scheduling, and Serving](/blog/batching-serving)*
+
+---
+
+## Coming Soon
+
+Topics to cover:
+- Weight-only vs weight+activation quantization
+- Formats: INT8, INT4, NF4, FP8, FP4
+- Methods: GPTQ, AWQ, SmoothQuant, GGUF, bitsandbytes, AQLM, QuIP#
+- Calibration, mixed-precision strategies
+- CPU inference (llama.cpp), Apple Silicon (MLX)
+- Pruning (structured, 2:4 semi-structured)
+- Quality-latency-cost tradeoff analysis
+
+---
+
+*Next up: [Speculative Decoding: Parallel Generation](/blog/speculative-decoding)*
+
+---
+
+*Found this useful? The full series: [The Inference Engine](/blog)*

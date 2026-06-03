@@ -1,18 +1,21 @@
 import { HeroSection } from "@/components/home/HeroSection";
-import { HighlightsBar } from "@/components/home/HighlightsBar";
 import { LearningCurve } from "@/components/home/LearningCurve";
 import { FeaturedPosts } from "@/components/home/FeaturedPosts";
 import { getAllPosts, getAllPapers } from "@/lib/content";
+import { HIDDEN_TAGS } from "@/lib/constants";
 
 export default function Home() {
   const posts = [...getAllPosts(), ...getAllPapers()]
+    .filter(
+      (p) => !p.frontmatter.tags.some((t) => HIDDEN_TAGS.includes(t))
+    )
+    .filter((p) => !p.frontmatter.draft)
     .sort((a, b) => new Date(b.frontmatter.date).getTime() - new Date(a.frontmatter.date).getTime())
-    .slice(0, 4);
+    .slice(0, 3);
 
   return (
     <>
       <HeroSection />
-      <HighlightsBar />
       <LearningCurve />
 
       {/* Philosophy */}
