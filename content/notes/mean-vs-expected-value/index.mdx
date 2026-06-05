@@ -1,0 +1,35 @@
+---
+title: "The arithmetic mean is expected value in disguise"
+date: "2026-06-06"
+tags: ["Probability", "Notes"]
+description: "The mean you learned in school is just expected value when every outcome is equally likely. Drop the uniform-probability assumption and you get a weighted sum — which leads directly to entropy."
+summary: "The mean you learned in school is just expected value when every outcome is equally likely. Drop the uniform-probability assumption and you get a weighted sum — which leads directly to entropy."
+project: "two-faces-of-entropy"
+author: "Tanul Singh"
+---
+
+I realized the arithmetic mean — the one you learn in grade school — is a special case of expected value, restricted to a universe where every outcome is equally likely.
+
+In the uniform case, if you have $n$ values $x_1, x_2, \ldots, x_n$, and each one occurs with probability $\frac{1}{n}$:
+
+$$E[X] = \sum_{i=1}^{n} \left(x_i \cdot \frac{1}{n}\right) = \frac{1}{n} \sum_{i=1}^{n} x_i$$
+
+Which is exactly the standard mean — sum divided by count.
+
+When outcomes have different probabilities, the constant $\frac{1}{n}$ breaks. Each value gets its own weight $p_i$, and the formula becomes a true weighted sum:
+
+$$E[X] = \sum_{i=1}^{n} x_i \cdot p_i$$
+
+The center-of-mass analogy makes this concrete. Place different weights at different points on a see-saw. The balance point (the expected value) shifts toward the heavier weights. With uniform weights, it sits at the geometric center (the arithmetic mean). With non-uniform weights, it moves.
+
+## Tying it back to entropy
+
+Now apply this directly to the "surprise = information" idea. The surprise of a single event is $-\log_2(p_i)$. The probability of that event is $p_i$. The expected value of the surprise across the whole system is the weighted sum:
+
+$$E[\text{Surprise}] = \sum_{i=1}^{n} p_i \cdot \left(-\log_2(p_i)\right)$$
+
+That's the definition of Shannon entropy. **Entropy is literally the expected value (weighted average) of surprise across all possible outcomes.**
+
+The thing I didn't appreciate before: entropy isn't a new concept invented for information theory. It's just expected value applied to the surprise function. Same machinery, different operand.
+
+This also explains the Akinator design choice. When I built the solver with uniform priors, the "best question" was the one that split candidates evenly — because under uniform probability, splitting candidates and splitting probability mass are the same thing. When I added non-uniform priors, that equivalence broke, and the solver had to start tracking probability mass directly instead of just counting. Same algorithm, but the math now actually uses the weighted-sum form because the constant $\frac{1}{n}$ shortcut no longer applies.

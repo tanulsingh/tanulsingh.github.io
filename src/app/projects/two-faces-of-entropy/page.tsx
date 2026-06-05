@@ -1,9 +1,12 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ExternalLink, Github } from "lucide-react";
+import { getNotesByProject } from "@/lib/content";
+import { formatDate } from "@/lib/utils";
 
 const GITHUB_URL = "https://github.com/tanulsingh/two-faces-of-entropy";
 const BLOG_URL = "/blog/llm-pretraining";
+const PROJECT_SLUG = "two-faces-of-entropy";
 
 export const metadata: Metadata = {
   title: "Bits and Surprise — The Two Faces of Entropy",
@@ -12,6 +15,8 @@ export const metadata: Metadata = {
 };
 
 export default function TwoFacesOfEntropyPage() {
+  const notes = getNotesByProject(PROJECT_SLUG).filter((n) => !n.frontmatter.draft);
+
   return (
     <article className="mx-auto max-w-3xl px-6 pb-24 pt-32">
       {/* Header */}
@@ -38,24 +43,18 @@ export default function TwoFacesOfEntropyPage() {
         </p>
 
         <div className="mb-6 flex flex-wrap items-center gap-4">
-          <span
-            className="rounded px-2 py-0.5 font-mono text-xs"
-            style={{
-              backgroundColor: "var(--tag-bg)",
-              color: "var(--tag-text)",
-            }}
-          >
-            In Progress
-          </span>
           <Link
             href={GITHUB_URL}
             target="_blank"
             rel="noopener noreferrer"
-            className="flex items-center gap-1.5 text-sm font-medium hover:opacity-80"
-            style={{ color: "var(--text-muted)" }}
+            className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-90"
+            style={{
+              backgroundColor: "var(--primary)",
+              color: "var(--bg)",
+            }}
           >
             <Github size={14} />
-            Source
+            View on GitHub
           </Link>
         </div>
 
@@ -273,95 +272,170 @@ export default function TwoFacesOfEntropyPage() {
           Cross Entropy and Uncertainty.
         </p>
 
-        {/* The projects */}
-        <h2>The projects</h2>
+        {/* The Project */}
+        <h2>The Project</h2>
+
+        <h3>Akinator — Inspired from Wordle Solution but Easier</h3>
 
         <p>
-          Each project applies the same engine (entropy, information gain, Bayesian
-          update) to a different problem of increasing nastiness.
+          If you&apos;ve watched Grant Sanderson&apos;s{" "}
+          <a
+            href="https://www.youtube.com/watch?v=v68zYyaEmEA"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Wordle video
+          </a>
+          , you&apos;ve already seen the canonical demo of information theory in
+          action — entropy picking the optimal guess at every step, the solver
+          narrowing 13,000 candidate words down to one. He even walks through
+          the subtle moments — like when the solver gets down to two candidate
+          words and has no way to break the tie except guessing one and hoping,
+          then upgrades the solver with word-frequency priors so it learns to
+          prefer the more common candidate. If you haven&apos;t watched it yet,
+          go do that first. It&apos;s twenty minutes and it&apos;ll change how
+          you think about guessing games forever.
+        </p>
+
+        <p>
+          I tried implementing it myself. And the <em>theory</em> clicked
+          instantly — but the <em>implementation</em> didn&apos;t.
+          Wordle&apos;s feedback isn&apos;t binary; every guess produces one of
+          243 possible colour patterns (5 squares × 3 colours each). So every
+          entropy calculation is a 243-bucket sum, every belief update is a
+          243-pattern filter, and the algorithm hides under the combinatorial
+          machinery. You can verify it works statistically, but you can&apos;t{" "}
+          <em>feel</em> it work — the steps are too dense to follow by hand,
+          the bookkeeping too heavy to debug by inspection.
+        </p>
+
+        <p>
+          So instead of redoing Wordle (Grant already does it definitively), I
+          built{" "}
+          <strong>
+            <a
+              href={`${GITHUB_URL}/tree/main/akinator`}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Akinator
+            </a>
+          </strong>{" "}
+          — same engine on a smaller, predictable domain. 46 animals, 18 binary
+          features, yes/no questions only. The whole entropy table fits on a
+          screen, you can compute any step on a napkin, and you can{" "}
+          <em>see</em> why the solver picks what features at each step
+        </p>
+
+        <p>
+          I deliberately built in the same arc as Grant&apos;s video, just
+          slower and more visible at every step:
         </p>
 
         <ul>
           <li>
-            <strong>
-              <a
-                href={`${GITHUB_URL}/tree/main/akinator`}
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                <code>akinator/</code>
-              </a>
-            </strong>{" "}
-            — the warm-up. A 20-questions-style solver over a small hand-authored
-            celebrity table. The cleanest possible demonstration of &ldquo;pick the
-            question with maximum expected information gain.&rdquo; If you can build
-            this, you understand the algorithm.
+            <strong>Start with uniform priors</strong> — every animal equally
+            likely. The solver works, the math holds, ~5.6 questions average.
+            But two pairs of animals (Horse/Cow, Pig/Rabbit) have{" "}
+            <em>identical feature vectors</em>, and the solver can&apos;t break
+            the tie no matter what it asks — the same dead-end Grant hits with
+            two-word ambiguity in Wordle.
           </li>
           <li>
-            <strong>
-              <a
-                href={`${GITHUB_URL}/tree/main/wordle`}
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                <code>wordle/</code>
-              </a>
-            </strong>{" "}
-            — the canonical example, popularised by 3B1B. An optimal Wordle solver
-            with frequency-based priors and the full 243-pattern entropy machinery.
-            Same algorithm as Akinator but with significantly more engineering
-            attached.
+            <strong>Fix the dataset.</strong> Add two features that target the
+            indistinguishability directly. The dead-ends vanish.
           </li>
           <li>
-            <strong>
-              <a
-                href={`${GITHUB_URL}/tree/main/llm-20-questions`}
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                <code>llm-20-questions/</code>
-              </a>
-            </strong>{" "}
-            — the capstone. An agent for Kaggle&apos;s{" "}
-            <a
-              href="https://www.kaggle.com/competitions/llm-20-questions"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              LLM 20 Questions
-            </a>{" "}
-            competition that uses the same engine but with an LLM as a very noisy
-            oracle. Everything that <em>can</em> go wrong here does, which is kind
-            of the whole point.
+            <strong>Add non-uniform priors</strong> — Just like in Wordle not
+            all the candidate words can be answer and some occur more than the
+            other, animals also differ in popularity and common animals might
+            be the answer in real life than rarer ones. Lion gets a higher
+            prior than Platypus, because that&apos;s what a real player would
+            pick. Watch the solver&apos;s strategy shift from{" "}
+            <em>&ldquo;split the candidate pool&rdquo;</em> to{" "}
+            <em>&ldquo;split the probability mass.&rdquo;</em> Common animals
+            get found in 4 questions instead of 5. The same move Grant makes
+            when he adds word-frequency priors from a Google dataset.
           </li>
         </ul>
 
         <p>
-          More to come as I find new things to chase. Each project has its own
-          README with the algorithm, the result, and whatever surprised me along the
-          way.
-        </p>
-
-        {/* Why this repo exists */}
-        <h2>Why this repo exists</h2>
-
-        <p>
-          This repo exists to admire the beauty of Cross Entropy, Entropy and
-          Uncertainty and how elegantly they summarise this feeling in mathematical
-          form. We get handed information-theoretic tools in ML as if they&apos;re
-          just formulas to plug in. They&apos;re not — they&apos;re a whole way of
-          thinking about uncertainty, observation, and belief update that goes way
-          beyond loss functions. The best way I know to actually internalise
-          something like that is to build things where the formulas have to carry
-          real weight. If a bot can&apos;t guess &ldquo;Beyoncé&rdquo; in seven
-          questions, the formula failed <em>me</em> — not the other way around.
+          Three experiments, written up in{" "}
+          <a
+            href={`${GITHUB_URL}/blob/main/akinator/README.md`}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <code>akinator/README.md</code>
+          </a>
+          , each with the numbers and the surprises. The point is not the bot —
+          it&apos;s that <em>every</em> concept in information theory has a
+          small, predictable version you can verify by hand before you trust it
+          at scale.
         </p>
 
         <p>
-          If you came here just for the code: it&apos;s all in the project folders.
-          If you came to chase the same thread I did: start with the four links
-          above, then poke around.
+          <strong>If you want the deeper learning loop</strong>: watch
+          Grant&apos;s video, then try implementing Wordle yourself. When the
+          243-pattern machinery slows you down (it will), come read through
+          Akinator. Both projects does the same thing; one just hides nothing.
         </p>
+
+        <h3>
+          What&apos;s next — LLM 20 Questions <em>(coming soon)</em>
+        </h3>
+
+        <p>
+          The natural extension is to swap the deterministic answerer for an
+          LLM — noisy, sometimes wrong, candidate space unbounded. The same
+          engine should still work but with Bayesian belief update instead of
+          hard filtering. That&apos;s the bridge from Akinator (clean) to
+          real-world systems (messy). Building this next as an agent for
+          Kaggle&apos;s{" "}
+          <a
+            href="https://www.kaggle.com/competitions/llm-20-questions"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            LLM 20 Questions
+          </a>{" "}
+          competition.
+        </p>
+
+        {/* Learning notes — at the end, Olah-style */}
+        <h2>Learning notes</h2>
+
+        <p>
+          A handful of intuitions that clicked while I was building this. Each
+          one is a question I had and what I figured out, written down so
+          I&apos;d remember the moment things stopped feeling abstract.
+        </p>
+
+        {notes.length > 0 ? (
+          <ul style={{ listStyle: "none", paddingLeft: 0 }}>
+            {notes.map((note) => (
+              <li key={note.slug} style={{ marginBottom: "0.5rem" }}>
+                <Link href={`/notes/${note.slug}`}>
+                  {note.frontmatter.title}
+                </Link>{" "}
+                <span
+                  style={{
+                    fontFamily: "var(--font-mono)",
+                    fontSize: "0.7rem",
+                    color: "var(--text-muted)",
+                    marginLeft: "0.5rem",
+                  }}
+                >
+                  {formatDate(note.frontmatter.date)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p style={{ fontStyle: "italic", color: "var(--text-muted)" }}>
+            Notes coming soon.
+          </p>
+        )}
       </div>
 
       {/* Footer with link back */}

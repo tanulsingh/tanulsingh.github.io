@@ -1,0 +1,47 @@
+---
+title: "Is \"expected value = probability\" circular?"
+date: "2026-06-06"
+tags: ["Probability", "Frequentism", "Notes"]
+description: "For a fair coin, the expected value of the flip equals the probability of heads. Defining probability through expected value seems circular — but it's actually a bridge between math and reality."
+summary: "For a fair coin, the expected value of the flip equals the probability of heads. Defining probability through expected value seems circular — but it's actually a bridge between math and reality."
+project: "two-faces-of-entropy"
+author: "Tanul Singh"
+---
+
+Quick observation that confused me: define a coin flip where Heads = 1 and Tails = 0, with probability $p$ of heads. The expected value is:
+
+$$E[X] = (1 \cdot p) + (0 \cdot (1-p)) = p$$
+
+So the expected value of the coin flip *is* the probability of heads. And frequentist probability says: the probability of heads is what you'd measure if you flipped the coin infinitely many times and averaged the results. That average **is** the expected value.
+
+So: probability is defined as a limiting average, expected value is defined using probability, and the two come out equal. Is that circular?
+
+It feels circular, but it isn't — and the reason is that "probability" actually means two different things, depending on whether you're doing math or measuring reality.
+
+## Two definitions, not one
+
+**Theoretical (axiomatic) probability** is a number we just declare. "Assume the coin has $p = 0.5$." In this world, the coin doesn't physically exist; we're working entirely on paper. The expected value is a mechanical consequence of the assumption. The math doesn't care if the coin is real.
+
+**Empirical (frequentist) probability** is a quantity we measure. We pick up a physical piece of metal and ask, "what's its actual bias?" We don't know $p$. We flip it many times, count the heads, divide by the total. The fraction we get is our *estimate* of $p$.
+
+These are different objects. One lives in math, the other in reality.
+
+## The Law of Large Numbers is the bridge
+
+The thing that connects them is a theorem: as the number of physical trials approaches infinity, the empirical average **converges** to the theoretical expected value. This is the **Law of Large Numbers**.
+
+So the loop isn't circular — it's a connection between two separate domains:
+
+- Theory uses an assumed $p$ to compute $E[X]$.
+- Reality uses infinite physical averages to *discover* what $p$ must be.
+- The law of large numbers guarantees that, given enough trials, the second converges to the first.
+
+If you only had one of these, the system would either be unfalsifiable (pure theory with no reality check) or unprincipled (pure measurement with no underlying structure). Having both, connected by a theorem, is what makes probability useful.
+
+## Why this mattered for the project
+
+I bumped into this when thinking about priors in Akinator. The non-uniform priors I assigned to animals ("Lion = 0.07, Platypus = 0.0025") are pure assumed-theoretical priors. They come from my intuition about what people pick in a guessing game.
+
+If I wanted to make them empirical, I'd have to run the game with real users and count how often each animal got picked. After enough games, the empirical frequencies would converge to *the actual* probability distribution over what people pick.
+
+The two are different things, even though we use the same word ("prior") for both. One is an assumption I plugged into the math; the other is a measurement I'd extract from data. The Bayesian framing pretends they're interchangeable for convenience, but they're actually two different objects connected by a theorem.

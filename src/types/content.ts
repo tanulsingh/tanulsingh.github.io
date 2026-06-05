@@ -10,6 +10,7 @@ export interface PostFrontmatter {
   featured?: boolean;
   draft?: boolean;
   author?: string;
+  project?: string;
 }
 
 export interface Post {
