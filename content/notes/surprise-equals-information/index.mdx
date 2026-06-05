@@ -1,0 +1,28 @@
+---
+title: "Surprise and information are the same thing"
+date: "2026-06-06"
+tags: ["Information Theory", "Entropy", "Notes"]
+description: "Entropy measures how much you'll be surprised on average. Surprise measures how much information you gain. These are not two related concepts — they're literally identical."
+summary: "Entropy measures how much you'll be surprised on average. Surprise measures how much information you gain. These are not two related concepts — they're literally identical."
+project: "two-faces-of-entropy"
+author: "Tanul Singh"
+---
+
+The thing that took me a while to accept: in information theory, **information** and **surprise** are not metaphors for each other. They are the same quantity, measured the same way, with the same formula.
+
+If something has probability $p$ of happening, the surprise (or "surprisal") of seeing it is:
+
+$$I = -\log_2(p)$$
+
+That's also the information content. Same number.
+
+The everyday intuition lines up perfectly:
+
+- **High probability event → low surprise → low information.** If I tell you "the sun rose today", you gain nothing. You knew. The probability is essentially 1, $-\log_2(1) = 0$ bits. Zero information.
+- **Low probability event → high surprise → high information.** If I tell you "it snowed in the Sahara today", that's massive news. The probability is tiny, $-\log_2(0.0001) \approx 13.3$ bits. Lots of information.
+
+So when we talk about compressing data, we're literally saying: *spend the absolute minimum number of bits on the boring, highly-probable stuff so we save space for the rare, surprising stuff.* That's why Huffman coding exists. That's why ZIP works. That's why a model with low cross-entropy compresses well — it's a model that's rarely surprised by what comes next.
+
+The reason this clicked for me on this project: when I compute the entropy of a question in the Akinator solver, what I'm computing is *how surprised I expect to be by the answer*. A question where I already know the answer (everything answers yes) — zero surprise, zero entropy, zero information gained, useless question. A question where I have no idea which way it'll go (50/50 split) — maximum surprise, maximum entropy, maximum information gained, best possible question.
+
+**Picking the question with maximum entropy is the same as picking the question whose answer I'd be most surprised to learn.** Those are the same sentence. I just used to think of them as adjacent ideas.

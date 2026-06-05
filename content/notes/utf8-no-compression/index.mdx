@@ -1,0 +1,32 @@
+---
+title: "Why UTF-8 doesn't compress anything"
+date: "2026-06-06"
+tags: ["Information Theory", "Compression", "Notes"]
+description: "If every character gets 8 bits, you're implicitly assuming uniform probability — and uniform probability means zero compression."
+summary: "If every character gets 8 bits, you're implicitly assuming uniform probability — and uniform probability means zero compression."
+project: "two-faces-of-entropy"
+author: "Tanul Singh"
+---
+
+I was watching 3Blue1Brown's video on information theory when this hit me: the formula for information content is $-\log_2(p)$. So if every character in UTF-8 takes exactly 8 bits, we're treating every character as equally likely — and that means we're getting nothing back from the compression standpoint.
+
+Let me work through it.
+
+UTF-8 uses 1 byte (8 bits) for basic English characters. 8 bits encodes $2^8 = 256$ possible values. If we say each of those 256 characters appears with equal probability, then the probability of any one character is $\frac{1}{256}$.
+
+The information content per character:
+
+$$I = -\log_2\left(\frac{1}{256}\right) = 8 \text{ bits}$$
+
+The math matches the architecture exactly. **When you assume a uniform distribution, every character carries exactly 8 bits of information, so you need exactly 8 bits of storage.**
+
+But English isn't uniform. The letter `E` shows up about 12.7% of the time, the letter `Z` about 0.07%. Their actual information content:
+
+- `E`: $-\log_2(0.127) \approx 2.97$ bits
+- `Z`: $-\log_2(0.0007) \approx 10.48$ bits
+
+UTF-8 gives `E` 8 bits of space even though it only carries ~3 bits of actual information. That's the waste. Real compression algorithms (Huffman codes, arithmetic coding, what ZIP does) abandon fixed lengths — they give common letters short codes and rare letters long codes. The average drops from 8 bits/character to roughly 4–5 bits/character, which is around the true entropy of English.
+
+The insight: **uniform encoding is a worst-case strategy disguised as a neutral choice.** Treating everything as equally likely is mathematically the same as throwing away every prior you have about the data. UTF-8 isn't "uncompressed by accident" — it's *provably* uncompressed because of the assumption baked into its design.
+
+This is why Shannon's entropy is the floor: it's the average bits per symbol you'd need under the true distribution. UTF-8 sits at 8. Real English sits at ~4–5. The gap is exactly the prior information UTF-8 is ignoring.

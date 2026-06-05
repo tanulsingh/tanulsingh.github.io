@@ -64,6 +64,18 @@ export function getPaperBySlug(slug: string): Post | undefined {
   return getAllPapers().find((p) => p.slug === slug);
 }
 
+export function getAllNotes(): Post[] {
+  return getPostsFromDir("notes");
+}
+
+export function getNoteBySlug(slug: string): Post | undefined {
+  return getAllNotes().find((p) => p.slug === slug);
+}
+
+export function getNotesByProject(project: string): Post[] {
+  return getAllNotes().filter((p) => p.frontmatter.project === project);
+}
+
 export function getFeaturedPosts(): Post[] {
   return getAllPosts().filter((p) => p.frontmatter.featured);
 }
