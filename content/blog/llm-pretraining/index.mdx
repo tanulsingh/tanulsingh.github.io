@@ -6,6 +6,7 @@ author: "Tanul Singh"
 description: "How LLMs learn from raw text — the three stages of frontier LLM training, what pre-training is actually trying to achieve, next-token prediction, data curation, scaling laws, and the modern multi-phase recipe used by Llama 3."
 summary: "Before fine-tuning and alignment, a base model has to learn the structure of language and the shape of the world from raw text. This post covers where pre-training sits in the LLM pipeline, why next-token prediction works, how trillions of tokens get curated, how scaling laws decide model size, and the three internal phases — initial training, long-context extension, annealing — that produce a modern base model."
 featured: true
+draft: true
 ---
 
 *This is Part 1 of [**The Loss Landscape of LLM Training**](/blog) — a series covering everything from pre-training through fine-tuning to alignment, explaining how modern LLMs go from random weights to aligned intelligence.*
@@ -507,7 +508,7 @@ This is what a 2026 frontier pre-training run looks like end to end. The objecti
 
 ---
 
-*Next up: [Distributed Training: Making It Fit](/blog/distributed-training) — how to train a model that doesn't fit on one GPU.*
+*Next up: [Understanding Transformer Training on GPUs](/blog/transformer-training-on-gpus) — what actually happens on one GPU during training, and the techniques that scale to a small cluster.*
 
 ---
 

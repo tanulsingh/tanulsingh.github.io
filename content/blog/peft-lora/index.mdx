@@ -1,36 +1,466 @@
 ---
-title: "Fine-Tuning I: LoRA, Adapters, and All Things PEFT"
-date: "2026-06-05"
-tags: ["LLM Training", "LoRA", "PEFT", "Fine-tuning", "Adapters", "The Loss Landscape of LLM Training"]
+title: "Fine-Tuning: Teaching a Model to Listen"
+date: "2026-06-22"
+tags: ["LLM Training", "Fine-tuning", "SFT", "LoRA", "PEFT", "QLoRA", "The Loss Landscape of LLM Training"]
 author: "Tanul Singh"
-description: "Every parameter-efficient fine-tuning method explained from first principles — LoRA and its 15+ variants, adapters, prompt tuning, prefix tuning, and how to choose between them."
-summary: "You have a 70B model and want to adapt it. Full fine-tuning costs a fortune. This post covers every PEFT method: LoRA's low-rank insight and its explosion of variants (QLoRA, DoRA, AdaLoRA, VeRA, GaLore), adapter architectures, prompt/prefix tuning, and a decision framework for when to use what."
+description: "From base model to useful model — SFT, instruction tuning, and the parameter-efficient methods (Adapters, Prompt Tuning, LoRA, QLoRA) that make fine-tuning frontier-scale models possible without frontier-scale compute."
+summary: "Pre-training builds a base model that knows the world but doesn't know how to talk to you. This post covers what fine-tuning actually does — the SFT objective and loss masking — and why most fine-tuning in the wild has to be parameter-efficient. From Adapters and Prompt Tuning to the LoRA + QLoRA recipe that runs on a single GPU, with the math, the practice, and the cases where it doesn't quite match full fine-tuning."
 featured: true
 draft: true
 ---
 
 *This is Part 4 of [**The Loss Landscape of LLM Training**](/blog) — a series covering everything from pre-training through fine-tuning to alignment.*
 
-*Previously: [The Numerics: Precision, Optimizers, and Stability](/blog/training-numerics)*
+*Previously: [Pre-Training: Teaching a Model to Predict](/blog/llm-pretraining)*
 
 ---
 
-## Coming Soon
+In the [pre-training post](/blog/llm-pretraining), we built a model that has read a substantial fraction of human-written text and learned to predict the next token across all of it. That model is a remarkable artifact. It also can't really *do* anything useful out of the box.
 
-Topics to cover:
-- Why fine-tune? (base model → useful model gap)
-- Full fine-tuning (LR selection, layer-wise decay, gradual unfreezing)
-- **LoRA deep dive**: math, rank selection, which modules, alpha scaling, initialization
-- LoRA variants: QLoRA, LoRA+, rsLoRA, DoRA, AdaLoRA, LoRA-FA, VeRA, GaLore, PiSSA, LoftQ
-- Adapters (Houlsby, Pfeiffer, parallel)
-- Prompt tuning, prefix tuning, P-tuning v1/v2
-- IA3, BitFit, LLaMA-Adapter
-- PEFT method selection criteria (when to use what)
-- Composing/stacking multiple LoRAs, S-LoRA serving
+Ask a base model "What is the capital of France?" and it might continue with "What is the capital of Germany? What is the capital of Italy?" It has the knowledge but not the behavior. The world's facts live inside its weights, but the model has no concept of being asked a question and giving an answer.
+
+This post is about closing that gap.
 
 ---
 
-*Next up: [Fine-Tuning II: SFT, Quantization, and Model Merging](/blog/sft-quantization)*
+## From Base Model to Useful Model
+
+The pre-training objective is *predict the next token*. The data is whatever text we could find — Common Crawl, books, code, Wikipedia, scraped forums. Out of this comes a model that has a remarkable internal representation of the world but no idea how to behave like a useful assistant.
+
+The fix is **supervised fine-tuning** (SFT). Continue training the model — same architecture, same loss — but on a different kind of data: curated `(prompt, response)` pairs. Each example is a demonstration of "when someone asks this, you respond like this."
+
+A typical SFT example:
+
+```
+PROMPT:   Translate the following sentence to French: "The weather is nice today."
+RESPONSE: Le temps est agréable aujourd'hui.
+```
+
+Concatenate them into a single sequence, run the same next-token cross-entropy loss, and the model learns to map prompts to appropriate responses. No new architecture. No new loss. Just a new distribution of training data.
+
+### The One Detail That Matters: Loss Masking
+
+There's one technical subtlety that's worth pausing on. When you train on a `(prompt, response)` pair, you don't compute the loss on the prompt tokens — you only compute it on the response tokens.
+
+Why? Because the prompt isn't something the model should learn to *generate*. It's something the model should learn to *condition on*. Training the model to predict prompt tokens would push it to copy whatever the user wrote, which isn't the behavior we want.
+
+Concretely, if your sequence is:
+
+```
+[Translate to French: "Hello"]  [Bonjour]
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^   ^^^^^^^^^
+       prompt tokens             response tokens
+```
+
+…you mask the prompt tokens out of the loss calculation. The model still *sees* them (the causal attention works as usual; the response tokens attend to the prompt), but no gradient flows through the prompt-token positions. The model is being told: "given a prompt that looks like this, your job is to produce *only the response* that follows."
+
+Loss masking is a tiny implementation detail that turns out to be the conceptual core of SFT. Without it, SFT collapses into a slightly weird continuation of pre-training. With it, you've defined a new problem: "respond appropriately to the input, don't just continue it."
+
+### What SFT Data Actually Looks Like
+
+SFT datasets come from three places:
+
+1. **Human annotators** writing demonstrations directly. Expensive and slow, but high quality. The original InstructGPT pipeline used this.
+2. **Distilled from larger models**. Take GPT-4, give it diverse prompts, collect responses, use *those* as training data for a smaller model. Most open-source instruction-tuned models (Alpaca, Vicuna, dozens since) are built this way.
+3. **Existing data converted into instruction form**. Take a dataset like SQuAD and reformat it as `(question, answer)` pairs — instant SFT data.
+
+A modern SFT mix is usually all three: a core of carefully written human demonstrations, distilled outputs from a frontier model for breadth, and converted academic datasets for diversity. The total dataset size is typically in the millions of examples — large enough to be useful, small enough to fit in a few hours of training.
+
+### Where SFT Sits in the Three-Stage Pipeline
+
+To recap from the pre-training post:
+
+| Stage | Teaches the model | Compute share |
+|---|---|---|
+| **Pre-training** | What the world is (capability) | ~98% |
+| **SFT** | How to respond (form) | ~1–2% |
+| **Alignment (RLHF/DPO)** | What to prefer (taste) | ~0.1–1% |
+
+SFT is the bridge between *capability* (pre-training) and *taste* (alignment). It's where the model learns the *shape* of an interaction — how to follow instructions, where to start a response, when to stop, how to format. The actual judgments about which response is *better* come later, in alignment.
+
+This stage is also the cheapest, by far. A few million examples at a few hours of compute on a few GPUs versus the months on tens of thousands of GPUs that pre-training took. Which is the entire reason this post exists — because it turns out you can do SFT on someone else's pre-trained model, for your own task, without renting out half a data center.
+
+---
+
+## Why We Don't Always Full-Fine-Tune
+
+In an ideal world, every time you wanted to adapt a model to your task, you'd just continue training it end-to-end on your data. Update every weight. Same SGD as before. Done.
+
+The world is not ideal.
+
+The cost of full fine-tuning a modern LLM has two components, and both of them are brutal.
+
+### The Memory Wall
+
+Take a 70B parameter model in BF16. The parameters themselves take **140 GB** (70B × 2 bytes). To train it with Adam, you also need:
+
+- **Gradients**: another 140 GB (one float per parameter)
+- **Optimizer state** (Adam keeps two copies: first and second moment): 280 GB in FP32, or 140 GB if you're careful with mixed precision
+- **Activations**: depends on batch size and sequence length, but easily another 50–100 GB even with checkpointing
+
+That's **560–660 GB** of GPU memory just to take one gradient step. A single H100 has 80 GB. You're looking at *eight H100s minimum* to fine-tune a 70B model with Adam, and that's before considering the headroom you actually need for stable training.
+
+For a 7B model the math is gentler — about 56–66 GB total — which means a single 80 GB GPU is technically sufficient. But you're still using a $30,000 piece of hardware to do something that should arguably take much less.
+
+### The Storage Explosion
+
+Even if you can afford the compute, full fine-tuning has a deployment problem. Every fine-tuned variant is a *complete copy* of the base model.
+
+Suppose you're a SaaS company offering "fine-tune Llama 70B on your internal documents" as a feature. Every customer fine-tune is 140 GB of weights you have to store, version, and serve. With 100 customers, that's 14 TB. With 10,000 customers, that's an entire data center wing dedicated to model checkpoints — for what is, in most cases, a small behavioral tweak to the same base model.
+
+### Most Fine-Tuning Doesn't Need a Full Update
+
+The third problem is conceptual. In most fine-tuning scenarios, you're not teaching the model genuinely new capabilities. You're teaching it:
+
+- Your company's tone of voice
+- Your specific output format (always include a JSON header, always cite sources)
+- A narrow domain vocabulary (medical codes, legal terminology, internal jargon)
+- A particular reasoning style for a specific task
+
+These are *small* changes to a model that already knows almost everything it needs to know. Full fine-tuning is a sledgehammer for a problem that mostly requires a chisel. We're updating 70 billion parameters to teach the model to start every response with "Dear customer."
+
+This is the observation that motivates **parameter-efficient fine-tuning** (PEFT): if the change you want is small, the *update* you make should be small too. Don't retrain the whole network — find a way to inject your task-specific behavior with the smallest possible number of new parameters.
+
+The whole rest of this post is about how to do that well.
+
+---
+
+## The PEFT Taxonomy
+
+Before walking through specific methods, it helps to have a mental model. PEFT methods fall into four broad families ([Xu et al. 2024](https://arxiv.org/abs/2403.14608)):
+
+| Family | What gets trained | Examples |
+|---|---|---|
+| **Additive** | New trainable modules inserted into the network | Adapters, Compacter |
+| **Selective** | A small subset of existing parameters | BitFit |
+| **Reparameterized** | A low-dimensional reparameterization of weight updates | LoRA, DoRA, VeRA |
+| **Soft prompting** | Learned input/prefix embeddings; the model itself stays frozen | Prefix Tuning, Prompt Tuning, P-Tuning |
+
+There's a useful unifying framing from [He et al. 2022](https://arxiv.org/abs/2110.04366): all of these methods can be seen as *modifications to specific hidden states in the network*, parameterized by (i) what modification function is applied and (ii) where in the network it's applied. Adapters modify hidden states by adding the output of a small MLP. LoRA modifies the linear-layer pre-activation by adding a low-rank update. Prefix Tuning modifies the attention KV cache by prepending learned vectors. Same shape of intervention; different positions and functions.
+
+That's the conceptual map. Let's walk through the actual methods.
+
+---
+
+## Pre-LoRA: The Methods Worth Knowing
+
+Before LoRA arrived in 2021, several PEFT methods were already in active use. Most of them are no longer the dominant choice, but they're worth understanding — both because they framed the problem space LoRA inherited, and because some of them are still useful in specific settings.
+
+### Adapters (Houlsby et al. 2019)
+
+The original idea. Insert a small two-layer MLP after each transformer sublayer:
+
+$$h \rightarrow h + W_{\text{up}} \cdot \sigma(W_{\text{down}} \cdot h)$$
+
+where $W_{\text{down}} \in \mathbb{R}^{d \times r}$ projects to a small bottleneck dimension $r \ll d$, then $W_{\text{up}} \in \mathbb{R}^{r \times d}$ projects back. The bottleneck makes the adapter cheap (typically ~1–3% extra parameters), and the residual structure means it starts as a near-identity at initialization.
+
+Adapters established the template that everything after followed: *add a small bottleneck module, freeze the rest of the network, train only the bottleneck.* The downside is inference overhead — adapters are sequential modules in the forward path, so each forward pass takes longer than the base model.
+
+### Prefix Tuning (Li & Liang 2021)
+
+Don't add anything to the network. Instead, prepend a small number of *learned* key/value vectors to the attention computation in every layer:
+
+$$\text{Attention}(Q, [K_{\text{prefix}}; K], [V_{\text{prefix}}; V])$$
+
+The prefix vectors $K_{\text{prefix}}, V_{\text{prefix}}$ are the only trainable parameters. The base model is frozen. Effectively, the prefixes act as a "learned context" that shifts the attention pattern of every subsequent layer.
+
+Prefix Tuning works well, but the gradients flowing back to those few learned vectors can be unstable, and the optimization is delicate. It's also not free at inference — you're prepending tokens to every layer, which changes the attention complexity slightly.
+
+### Prompt Tuning (Lester et al. 2021)
+
+A simpler version of prefix tuning. Instead of prepending learned vectors at *every* layer, only prepend them at the *input embedding* layer. The first $k$ token positions of the input become learnable parameters; everything downstream uses the base model unchanged.
+
+Prompt Tuning has a striking property: **it works at scale but fails at small scale.** For models below ~10B parameters, it's noticeably worse than full fine-tuning. Above ~10B, the gap closes, and at frontier scale it can match full FT on some tasks. The intuition (debated, but plausible) is that very large models have enough capacity in their early layers to translate a few learned input vectors into rich downstream behaviors. Smaller models don't.
+
+This was an early hint of a pattern that would show up everywhere in PEFT: *the bigger your base model, the less your fine-tuning method has to work for it.*
+
+### P-Tuning v2 (Liu et al. 2022)
+
+The fix for Prompt Tuning's small-scale failure. Take prompt tuning, but apply it at every layer instead of just the input — basically, rediscover prefix tuning but optimize it more carefully (better initialization, higher learning rate, longer training). P-Tuning v2 closes the gap with full FT across model sizes and tasks. It's still used today in some settings, particularly in multi-task scenarios.
+
+### BitFit (Zaken et al. 2021)
+
+The simplest PEFT method imaginable: **freeze every weight matrix; only train the bias terms.** Most transformer linear layers have a bias parameter, but biases account for less than 0.1% of total parameters. Despite that, training only biases recovers a surprising fraction of full FT performance on many tasks.
+
+BitFit isn't competitive with LoRA in modern settings, but it's a useful reference point. When someone tells you "we trained 0.05% of the parameters and got 90% of the performance," BitFit is the proof that the lower bound on PEFT's parameter budget is ridiculously low.
+
+---
+
+## LoRA: The Centerpiece
+
+In 2021, [Hu et al. at Microsoft](https://arxiv.org/abs/2106.09685) introduced **Low-Rank Adaptation** (LoRA). It became the dominant PEFT method within months, and it's still the default choice in most modern fine-tuning pipelines.
+
+The idea is one observation, applied carefully.
+
+### The Intrinsic-Dimension Observation
+
+[Aghajanyan et al. 2020](https://arxiv.org/abs/2012.13255) made a striking finding: when you fine-tune a large pre-trained model on a downstream task, the *effective change* in weights is much lower-dimensional than the weights themselves. They measured this experimentally by reparameterizing fine-tuning as a search in a low-dim subspace and asking how small that subspace could be while still recovering full-FT performance. For BERT-large, you could often get away with a few hundred parameters worth of effective dimensionality — out of 340 million.
+
+The interpretation: pre-training puts the model in a region of weight space where the *useful adaptations* live on a low-dimensional manifold. The model already knows almost everything it needs; fine-tuning is a small projection in a small subspace.
+
+If that's true, then storing the full $\Delta W$ from fine-tuning is wasteful. We should be able to represent it in a much smaller form.
+
+### The LoRA Construction
+
+LoRA's idea is to factorize the weight update as a product of two low-rank matrices.
+
+For a pre-trained weight matrix $W \in \mathbb{R}^{d \times d}$ (most LoRA work targets the attention $W_q, W_v$ matrices, but the same applies to any linear layer), LoRA freezes $W$ and adds a learnable update $\Delta W = BA$, where:
+
+- $A \in \mathbb{R}^{r \times d}$
+- $B \in \mathbb{R}^{d \times r}$
+- $r \ll d$ (typically $r = 8, 16, 32, 64$)
+
+The full update has $d \times d$ parameters; the LoRA update has $2 \cdot d \cdot r$. For $d = 4096$ and $r = 16$, that's $4096 \times 4096 \approx 16.7$ million versus $2 \times 4096 \times 16 \approx 131$ thousand — a **128× reduction** in trainable parameters per matrix.
+
+The forward pass becomes:
+
+$$y = Wx + \frac{\alpha}{r} BAx$$
+
+The base computation $Wx$ is unchanged. The LoRA contribution $BAx$ adds a low-rank correction, scaled by $\alpha / r$.
+
+### Initialization: Starting at Zero
+
+A subtle but important detail: at the start of training, LoRA is initialized so that $\Delta W = 0$. Specifically:
+
+- $A$ is initialized with a Gaussian (the usual neural-net init)
+- $B$ is initialized to **zero**
+
+So $BA = B \cdot A = 0 \cdot A = 0$. The model behaves *identically* to the base model at step 0, and starts diverging only as training updates the weights. This means SFT with LoRA never has a "warmup" period where the model is confused by random adapter weights — you start from the pre-trained model's exact behavior and shape it from there.
+
+### The Scaling Factor α/r
+
+The factor $\alpha / r$ in the forward pass is a scalar that controls how much the LoRA update contributes. Two conventions:
+
+- **$\alpha = r$**: the update is scaled by 1. Common.
+- **$\alpha = 2r$**: the update is scaled by 2. Also common.
+
+The original paper recommends $\alpha = 2r$ as a default. In practice, $\alpha$ acts a bit like a learning-rate multiplier — increasing it amplifies the LoRA update's effect. Most practitioners pick $\alpha = r$ or $\alpha = 2r$ and tune the actual learning rate from there.
+
+There's been some recent debate (rsLoRA from [Kalajdzievski 2023](https://arxiv.org/abs/2312.03732)) that the correct scaling is $\alpha / \sqrt{r}$ rather than $\alpha / r$, particularly at higher ranks. The math is clean and the empirical results are positive, but the field hasn't fully migrated. If you're training at $r > 32$, it's worth trying.
+
+### Choosing the Rank r
+
+The rank parameter $r$ controls the capacity of your update. Higher $r$ means more trainable parameters and a richer family of possible updates. So is bigger always better?
+
+No. Empirically:
+
+- **$r = 4$ to $r = 16$** is enough for most style and format adaptation. The model is making small adjustments to its output behavior; the update naturally lives in a low-dim subspace.
+- **$r = 32$ to $r = 64$** helps when you're injecting more substantial domain knowledge or task-specific reasoning patterns.
+- **$r > 128$** is rarely useful and starts to introduce optimization instability.
+
+The rule of thumb: start with $r = 16$, see how it performs, scale up only if you're clearly hitting a capacity ceiling. A common debugging signal is "training loss plateaus above where you'd expect" — that's a hint that your rank is too low for the task.
+
+### Which Modules to Target
+
+LoRA can be applied to any linear layer in the transformer. The original paper applied it to $W_q$ and $W_v$ in the attention sublayer. Subsequent work has experimented with:
+
+- **Attention only ($W_q, W_v$)** — the original recipe; cheapest.
+- **All attention ($W_q, W_k, W_v, W_o$)** — slightly more expressive.
+- **All linear layers (attention + FFN)** — strictly best when you can afford it. The FFN layers in modern transformers contain ~2/3 of the model's parameters, so LoRA on attention alone is leaving most of the model un-adaptable.
+
+Empirically, "all linear" is the modern default. The HuggingFace PEFT library calls this `target_modules="all-linear"` and it's a sensible starting point.
+
+### The Killer Property: Merge at Inference
+
+Here's where LoRA pulls ahead of every other PEFT method.
+
+At training time, the forward pass has two terms: $Wx + \frac{\alpha}{r}BAx$. Computing this is slightly slower than just $Wx$.
+
+At inference time, you can fuse them. Compute $W' = W + \frac{\alpha}{r} BA$ once, store $W'$, and use it in place of $W$. The result is a model with **the same architecture, the same parameter count, and the same inference speed** as the base model. The LoRA adapters disappear into the merged weights; there's no additional computation, no additional memory access, no overhead.
+
+This is unique to LoRA among PEFT methods. Adapters can't merge — they're sequential modules with non-linearities. Prefix tuning can't merge — the prefixes are part of the input, not a weight modification. LoRA, because $\Delta W$ is itself a weight matrix, slots back into the original weight matrix cleanly.
+
+For deployment, this is the killer feature. You can fine-tune dozens of LoRA variants of the same base model, store each as a tiny adapter file (the $A, B$ matrices, typically 10–100 MB), and merge whichever one you need at deployment time. No serving-side overhead, no architectural change, no engineering cost. The merge is one matrix addition.
+
+### Memory: The Actual Win
+
+Let's quantify the savings concretely. Suppose we're fine-tuning a 7B parameter Llama-style model with Adam.
+
+**Full fine-tuning (BF16 weights, FP32 optimizer):**
+
+- Parameters: 14 GB
+- Gradients: 14 GB
+- Optimizer state (m and v): 56 GB
+- Activations (with checkpointing, batch=4, seq=2048): ~10 GB
+- **Total: ~94 GB** — needs an H100 80GB plus some spilling, or two 48GB cards.
+
+**LoRA fine-tuning (BF16 base frozen, BF16 LoRA, FP32 optimizer for LoRA only), r=16 on all-linear:**
+
+- Frozen parameters: 14 GB (no gradient or optimizer state needed)
+- LoRA parameters: ~50 MB
+- LoRA gradients: ~50 MB
+- LoRA optimizer state: ~200 MB
+- Activations: ~10 GB (same as before, this is dominated by the base model's forward pass)
+- **Total: ~25 GB** — fits comfortably on a 24 GB consumer GPU.
+
+The win comes almost entirely from **eliminating optimizer state for the frozen parameters**. Adam's two-moment state on 7B parameters is 56 GB by itself; LoRA replaces that with 200 MB. Activations and the base model are still big, but they're the same as inference — and we already know how to fit those on consumer hardware.
+
+This 4× memory reduction is what made it possible for individual researchers and small teams to fine-tune models that were previously inaccessible. And then QLoRA pushed it further.
+
+---
+
+## QLoRA: The Single-GPU Unlock
+
+Even with LoRA's memory savings, fine-tuning a 70B model on a single consumer GPU was out of reach. The base model itself, in BF16, is 140 GB — five times the size of any consumer card. You can do LoRA, but you still have to *hold the base model in GPU memory for the forward pass.*
+
+[QLoRA](https://arxiv.org/abs/2305.14314) ([Dettmers et al. 2023](https://arxiv.org/abs/2305.14314)) closes this gap. The recipe: keep LoRA's structure, but **quantize the frozen base model to 4 bits**. The LoRA adapters stay in BF16 (you need full precision for the part you're actually updating), but the giant frozen part of the network shrinks 4×.
+
+Three innovations make this work without destroying quality.
+
+### 4-Bit NF4 Quantization
+
+Standard 4-bit integer quantization assumes your weights are uniformly distributed across some range. They're not. Pre-trained transformer weights are approximately *normally distributed* — they cluster tightly around zero with a long tail. Uniform quantization wastes most of its representational capacity on the tails, where there are almost no weights.
+
+**NF4** (NormalFloat 4-bit) is a quantization scheme designed specifically for normally-distributed data. Its 16 quantization levels are spaced so that each level has roughly equal probability mass under a standard normal distribution. The theoretical justification: NF4 is *information-theoretically optimal* for normally-distributed data at 4 bits.
+
+In practice, NF4 produces noticeably less degradation than uniform INT4 — typically within 1% of full BF16 quality on downstream evals.
+
+### Double Quantization
+
+Quantization itself has overhead. To quantize a tensor, you need scale factors (and sometimes zero points) — these are usually stored in higher precision. For a typical block-wise quantization scheme with block size 64, that's one FP32 scale per 64 weights, adding 0.5 bits/weight on top of the 4-bit weights themselves.
+
+QLoRA quantizes the *quantization constants* too. The scale factors get their own 8-bit quantization with their own (smaller) set of FP32 metadata. Net savings: ~0.4 bits per weight, which adds up across a 70B model (about 3.5 GB).
+
+### Paged Optimizers
+
+Even with 4-bit base weights and tiny LoRA adapters, occasional memory spikes happen during training — particularly when the optimizer state momentarily expands. These spikes can OOM your training run even though average memory usage is comfortable.
+
+QLoRA uses NVIDIA's **unified memory** + **paged optimizers**: when a memory spike happens, the optimizer state can spill to CPU memory and page back in transparently. It's slower for those moments, but it prevents the entire training run from crashing.
+
+### Putting It Together
+
+The full QLoRA recipe:
+
+1. Load the base model with 4-bit NF4 quantization (with double quantization).
+2. Add LoRA adapters in BF16 to the target modules.
+3. Forward pass: dequantize base weights to BF16 on-the-fly, multiply, add LoRA contribution.
+4. Backward pass: gradients only flow through the BF16 LoRA weights. Base model gradients are not computed.
+5. Optimizer step: only on LoRA parameters, with paged offloading for safety.
+
+The result: **a 65B model fine-tunable on a single 48 GB GPU**, with quality typically within 1% of full-precision LoRA. [Dettmers et al.](https://arxiv.org/abs/2305.14314) showed QLoRA-tuned 65B models matching or exceeding ChatGPT on Vicuna benchmarks at the time of release.
+
+In production, QLoRA isn't strictly the right answer for every fine-tune — if you have multi-GPU resources, full-precision LoRA trains faster (no dequantization overhead). But for the case of "I want to fine-tune the largest model that will fit on my hardware," QLoRA is the recipe.
+
+The HuggingFace PEFT + bitsandbytes integration makes this about ten lines of code. Pick a 4-bit quantization config, load the model, attach LoRA adapters, train normally. The complexity is in the libraries, not in the user code.
+
+---
+
+## Practical Considerations
+
+The mechanics above are the foundation. Here's what actually matters when you sit down to fine-tune.
+
+### Choose Rank by Task Difficulty
+
+The choice of $r$ is the single most important hyperparameter. As a rule of thumb:
+
+- **Style / format adaptation** (always respond in JSON, always use a specific tone): $r = 8$ to $16$
+- **Domain adaptation** (learn medical/legal/internal vocabulary): $r = 16$ to $32$
+- **Capability injection** (teach the model to do new reasoning, follow novel formats): $r = 64$ or higher, and even then, LoRA may struggle (more on this below)
+
+Higher rank costs you linearly more parameters and slightly more compute, but the bigger risk is *training instability* — high-rank LoRA with high learning rates can diverge. If you're scaling up rank, scale down learning rate.
+
+### LoRA Tolerates High Learning Rates
+
+A non-obvious property of LoRA: the optimal learning rate is typically **much higher than full fine-tuning** — often 10× to 100× higher. Full FT often uses LRs in the $10^{-5}$ range; LoRA happily trains at $10^{-4}$ or higher.
+
+Why? The LoRA update is constrained to a low-rank subspace, so each gradient step has a limited "blast radius." High learning rates that would cause catastrophic divergence in full FT are tolerable in LoRA because the update space is too small to break the model.
+
+Practical default: start at $\text{LR} = 2 \times 10^{-4}$ for LoRA on a 7B model. Scale down if you see instability, scale up if convergence is slow.
+
+### Learning-Rate Asymmetry
+
+A more subtle finding from [LoRA+](https://arxiv.org/abs/2402.12354) (Hayou et al. 2024): the matrices $A$ and $B$ behave differently and benefit from *different* learning rates. Specifically, $B$ should use a higher LR than $A$ — typically by a factor of 16. The intuition comes from a scaling-limit analysis showing that with equal LRs, $A$ updates faster than $B$ and the learning is unbalanced.
+
+This is supported in HuggingFace PEFT via the `loraplus_lr_ratio` parameter. It's a simple change with a real but modest improvement (often 1–2% on downstream benchmarks). Worth turning on by default once you're past the basics.
+
+### Catastrophic Forgetting
+
+LoRA reduces catastrophic forgetting compared to full FT, because the base model is preserved exactly — but it doesn't eliminate it. If you fine-tune on a narrow domain, the LoRA-augmented model can lose general capability.
+
+Mitigations:
+
+- Mix in some general-purpose data with your domain-specific data (10–20% is often enough).
+- Use a KL regularization to the base model: penalize divergence from the base model's output distribution. This is what RLHF does explicitly (next post in the series).
+- Train for fewer epochs — LoRA tends to overfit narrow domains faster than full FT does.
+
+### Numerical Instability Watch-List
+
+Things that can go wrong:
+
+- **NaN losses**: usually too-high learning rate at high rank, or numerical issues with bfloat16 + low ranks. Drop the LR; use FP32 for the LoRA parameters.
+- **Loss plateaus early**: rank is too low, or you're training on data the base model already handles fine.
+- **Loss decreases but eval performance worsens**: classic overfitting on narrow domain. Train fewer epochs, mix in more diverse data, or use early stopping.
+
+---
+
+## When LoRA Doesn't Match Full Fine-Tuning
+
+LoRA is excellent. It's also not free. The most rigorous study of when LoRA matches and fails to match full FT is [Biderman et al. 2024](https://arxiv.org/abs/2405.09673) — bluntly titled *"LoRA Learns Less and Forgets Less."*
+
+Their finding: **LoRA's behavior depends sharply on what kind of adaptation you're doing.**
+
+- For **instruction tuning and style adaptation** (the most common SFT use case), LoRA closes the gap with full FT and often beats it on metrics like KL preservation.
+- For **capability injection** (teaching the model new skills like math, code, or unfamiliar reasoning patterns), LoRA *trails* full FT, sometimes by significant margins. Especially when training on a lot of data.
+
+The interpretation: low-rank updates are a good representation for *re-shaping behavior* but a worse representation for *adding new structured computation*. Style and format are about reweighting and reformatting things the model already knows. New capabilities require richer changes than a low-rank update can express.
+
+The flip side is in the title: LoRA also *forgets less*. Full FT, when training on narrow data, drifts away from the base model's general capability. LoRA stays anchored. So if you care about preserving general capability while adapting to a domain, LoRA is actually *better* than full FT — even when its task-specific performance is slightly lower.
+
+The practical decision matrix:
+
+| If you want to... | Use |
+|---|---|
+| Adapt tone, format, or output style | LoRA. Easy choice. |
+| Adapt to a domain vocabulary | LoRA. Consider higher rank. |
+| Teach math / reasoning / code from scratch | Full FT, if you can afford it. |
+| Preserve general capability while adapting | LoRA. It forgets less. |
+| Fine-tune the largest model your hardware can hold | QLoRA. |
+
+Most fine-tuning in production falls in the first two rows, which is why LoRA dominates. The cases where LoRA underperforms — capability injection at scale — are also the cases where you're already running a frontier-lab-scale operation, and probably have the resources for full FT anyway.
+
+---
+
+## What's Next
+
+LoRA is the foundation. The PEFT field has produced dozens of variants on top of it — DoRA, PiSSA, MoRA, GaLore, AdaLoRA, VeRA, and more — most claiming to outperform vanilla LoRA on some benchmark.
+
+The honest answer is that most of those wins come from careful hyperparameter tuning that doesn't transfer to production settings. [Lialin et al. 2024](https://arxiv.org/abs/2303.15647) ran a head-to-head comparison of 15 PEFT methods on models up to 11B and found that *"methods previously shown to surpass a strong LoRA baseline face difficulties in resource-constrained settings, where hyperparameter optimization is limited and the network is fine-tuned only for a few epochs."* In the regime real practitioners actually deploy in, vanilla LoRA with sensible defaults is hard to beat.
+
+That doesn't mean the variants aren't worth knowing about. **GaLore** (gradient low-rank projection) is a genuinely different idea — it lets you do *full-parameter* training within a low-rank gradient subspace, sidestepping LoRA's "behavior reshaping" limitation while keeping the memory advantage. **DoRA** decomposes the weight update into magnitude and direction components, claiming consistent improvements across tasks. **MoRA** uses a single square matrix instead of LoRA's two low-rank matrices to support higher-rank updates at the same parameter count, and outperforms LoRA specifically on knowledge-injection tasks.
+
+If LoRA isn't quite getting you the performance you need, this is the design space to explore. But don't reach for them by default — start with vanilla LoRA and have a real, measurable gap before you complicate the recipe.
+
+---
+
+The rest of fine-tuning lives in two more topics: **quantization** (both during training and at inference time) and **model merging** (combining multiple fine-tuned models into one). PEFT was about saving compute through small updates. Quantization is about saving compute through fewer bits per weight. Merging is about getting more out of the fine-tunes you already have. That's the next post.
+
+After that, the series shifts to **alignment** — RLHF, DPO, and the methods that turn an instruction-following model into one that humans actually prefer talking to. SFT teaches *form*; alignment teaches *taste*. They're separate problems with different tools.
+
+For now: the key takeaway is that you don't need a frontier lab to fine-tune a frontier model. With LoRA, you need a single high-end GPU. With QLoRA, you need a consumer card. The arithmetic of fine-tuning is no longer a bottleneck. The bottleneck has shifted entirely to *what data you have* and *what behavior you actually want* — which, as it should be, is the only part that's genuinely hard.
+
+---
+
+## References
+
+- **[LoRA: Low-Rank Adaptation of Large Language Models](https://arxiv.org/abs/2106.09685)** (Hu et al., 2021) — The original LoRA paper.
+- **[QLoRA: Efficient Finetuning of Quantized LLMs](https://arxiv.org/abs/2305.14314)** (Dettmers et al., 2023) — 4-bit base + LoRA adapters; the single-GPU unlock.
+- **[Parameter-Efficient Transfer Learning for NLP](https://arxiv.org/abs/1902.00751)** (Houlsby et al., 2019) — Adapters; the original PEFT method.
+- **[Prefix-Tuning: Optimizing Continuous Prompts for Generation](https://arxiv.org/abs/2101.00190)** (Li & Liang, 2021) — Prefix Tuning.
+- **[The Power of Scale for Parameter-Efficient Prompt Tuning](https://arxiv.org/abs/2104.08691)** (Lester et al., 2021) — Prompt Tuning.
+- **[P-Tuning v2: Prompt Tuning Can Be Comparable to Fine-tuning Universally Across Scales](https://arxiv.org/abs/2110.07602)** (Liu et al., 2022) — P-Tuning v2.
+- **[BitFit: Simple Parameter-efficient Fine-tuning](https://arxiv.org/abs/2106.10199)** (Zaken et al., 2021) — Train only biases.
+- **[Intrinsic Dimensionality Explains the Effectiveness of Language Model Fine-Tuning](https://arxiv.org/abs/2012.13255)** (Aghajanyan et al., 2020) — The intrinsic-dimension justification for low-rank methods.
+- **[Towards a Unified View of Parameter-Efficient Transfer Learning](https://arxiv.org/abs/2110.04366)** (He et al., 2022) — The mental model that connects all PEFT methods.
+- **[LoRA Learns Less and Forgets Less](https://arxiv.org/abs/2405.09673)** (Biderman et al., 2024) — The honest contrarian study on when LoRA fails.
+- **[LoRA+: Efficient Low Rank Adaptation of Large Models](https://arxiv.org/abs/2402.12354)** (Hayou et al., 2024) — Asymmetric learning rates for $A$ and $B$.
+- **[A Rank Stabilization Scaling Factor for Fine-Tuning with LoRA](https://arxiv.org/abs/2312.03732)** (Kalajdzievski, 2023) — The $\alpha/\sqrt{r}$ scaling correction.
+- **[GaLore: Memory-Efficient LLM Training by Gradient Low-Rank Projection](https://arxiv.org/abs/2403.03507)** (Zhao et al., 2024) — Full-parameter training in a low-rank gradient subspace.
+- **[Scaling Down to Scale Up: A Guide to Parameter-Efficient Fine-Tuning](https://arxiv.org/abs/2303.15647)** (Lialin et al., 2024) — Empirical comparison of 15 PEFT methods.
+- **[Parameter-Efficient Fine-Tuning Methods for Pretrained Language Models: A Critical Review and Assessment](https://arxiv.org/abs/2403.14608)** (Xu et al., 2024) — Comprehensive PEFT survey.
+
+---
+
+*Next up: [Quantization and Model Merging](/blog/sft-quantization) — saving compute through fewer bits per weight, and combining fine-tuned models into one.*
 
 ---
 

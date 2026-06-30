@@ -1,37 +1,413 @@
 ---
-title: "Fine-Tuning II: SFT, Quantization, and Model Merging"
-date: "2026-06-10"
-tags: ["LLM Training", "SFT", "Quantization", "Model Merging", "GPTQ", "AWQ", "The Loss Landscape of LLM Training"]
+title: "Quantization and Model Merging"
+date: "2026-06-22"
+tags: ["LLM Training", "Quantization", "FP8", "GPTQ", "AWQ", "NF4", "Model Merging", "TIES", "The Loss Landscape of LLM Training"]
 author: "Tanul Singh"
-description: "The practical fine-tuning pipeline — supervised fine-tuning mechanics, quantization from fundamentals through GPTQ/AWQ/NF4, and model merging techniques (TIES, DARE, task arithmetic)."
-summary: "How to actually turn a base model into a useful assistant: chat formatting, loss masking, catastrophic forgetting mitigation. Plus the full quantization stack from symmetric/asymmetric fundamentals through INT4/NF4/FP8 formats to GPTQ and AWQ. And model merging — combining capabilities without retraining."
+description: "Two ways to get more out of the same model. Quantization shrinks the bit-width — covering the fundamentals (number formats, symmetric vs asymmetric, per-tensor vs per-channel), training-time quantization (BF16, FP8, what DeepSeek-V3 actually did), and post-training quantization (GPTQ, AWQ, NF4, SmoothQuant). Model merging combines fine-tuned variants into one — task arithmetic, model soups, TIES, DARE, SLERP."
+summary: "PEFT saved compute through small updates. Quantization saves compute through small numbers. From the math of why model weights are so quantizable, through the FP8 training recipes frontier labs use, to the GPTQ / AWQ / NF4 inference quantization stack — and then model merging, the surprising fact that you can often combine fine-tuned models by just adding their weight deltas."
 featured: true
 draft: true
 ---
 
 *This is Part 5 of [**The Loss Landscape of LLM Training**](/blog) — a series covering everything from pre-training through fine-tuning to alignment.*
 
-*Previously: [Fine-Tuning I: LoRA, Adapters, and All Things PEFT](/blog/peft-lora)*
+*Previously: [Fine-Tuning: Teaching a Model to Listen](/blog/peft-lora)*
 
 ---
 
-## Coming Soon
+In the [last post](/blog/peft-lora), we saw that you can adapt a 70B model on a single 48 GB GPU with QLoRA — base model frozen at 4-bit, LoRA adapters trained in BF16. That post quietly used a powerful tool without explaining it: **quantization**.
 
-Topics to cover:
-- Instruction tuning vs task-specific fine-tuning vs continual pre-training
-- Chat formatting (ChatML, Alpaca, ShareGPT), multi-turn training
-- Loss masking (completions only), packing with attention masks
-- Catastrophic forgetting (EWC, replay, L2 regularization)
-- NEFTune, label smoothing, SFT data quality vs quantity
-- **Quantization fundamentals**: symmetric/asymmetric, per-tensor/channel/group
-- INT8, INT4, NF4, FP4, FP8 formats
-- PTQ methods: GPTQ, AWQ, SmoothQuant, bitsandbytes, AQLM, QuIP#
-- Quantization-aware training (QAT)
-- **Model merging**: linear interpolation, SLERP, TIES, DARE, task arithmetic, frankenmerging
+This post is the explanation. We'll cover quantization end-to-end — the math of why it works, how training-time quantization (BF16, FP8) reshapes the arithmetic, and how post-training quantization (GPTQ, AWQ, NF4, SmoothQuant) lets you deploy frontier models on consumer hardware. Then we'll cover something that *isn't* quantization but lives in the same neighborhood: **model merging** — the surprising fact that you can often combine multiple fine-tuned models into one by just adding their weight deltas.
+
+Both are about getting more out of the model you already have. Quantization gets you the same model in fewer bits. Merging gets you many models worth of capability in the parameter count of one.
 
 ---
 
-*Next up: [RLHF: Reward Models and PPO](/blog/rlhf-ppo)*
+## Why Quantization Works at All
+
+Start with a simple question: a Llama 3 70B model has 70 billion 16-bit weights, totaling 140 GB. Why can we represent those same weights in 4 bits each (35 GB) and get almost the same model?
+
+The answer is in the data, not the algorithm.
+
+### Weights Are Very Specifically Distributed
+
+If you take any pre-trained transformer and plot a histogram of its weights, you'll see the same shape every time: a tight bell curve centered at zero, with a long tail of small-magnitude outliers. Roughly Gaussian, maybe with slightly heavier tails.
+
+This is the entire reason quantization works. We have 16 bits to spend per weight, but **most of those bits are spent representing distinctions we don't actually need**. The difference between a weight of $1.247 \times 10^{-3}$ and $1.248 \times 10^{-3}$ is just numerical noise — pre-training did not deliberately optimize the model to that precision. We can round both to the same 4-bit value and the model behaves nearly identically.
+
+The technical statement: **pre-trained weights have low effective precision.** The information content of each weight is much less than 16 bits.
+
+### Activations Are Worse, but Still Manageable
+
+Activations (the values flowing through the network at inference time) are also approximately Gaussian, but with a critical difference: they have **larger and rarer outliers** than weights. A typical attention activation might span $[-3, 3]$ for 99% of the values, with occasional spikes to $[-50, 50]$.
+
+These outliers matter. Naively quantizing a tensor with outliers wastes most of your representational capacity covering the outlier range, and gives you very poor resolution in the dense central region. Modern quantization methods deal with outliers explicitly — we'll see how.
+
+### The Failure Mode
+
+Quantization breaks badly when:
+
+1. The distribution isn't what you assumed (rare in pre-trained transformers; can happen during early training)
+2. The outliers in activations are extreme (frequent in larger models — there's a phenomenon where outliers grow with model scale)
+3. The number of bits is too low to represent the relevant information (4 bits is okay; 2 bits is hard; 1 bit is very hard)
+
+Most of the engineering in modern quantization is about handling case (2): how do you keep the quality of a 4-bit model when a few activation channels have values 100× larger than the rest?
+
+---
+
+## The Vocabulary of Number Formats
+
+Before walking through methods, let's get the formats straight.
+
+### Floating Point: FP32, FP16, BF16, FP8, FP4
+
+Floating-point numbers are split into three parts: a sign bit, a small number of exponent bits, and the rest as mantissa bits. Exponent bits set the *range* (largest and smallest representable values). Mantissa bits set the *precision* (how many distinct values exist within that range).
+
+| Format | Total bits | Sign | Exponent | Mantissa | Range | Use |
+|---|---|---|---|---|---|---|
+| FP32 | 32 | 1 | 8 | 23 | ~$10^{-38}$ to $10^{38}$ | Default. Optimizer state. |
+| FP16 | 16 | 1 | 5 | 10 | ~$10^{-5}$ to $10^{4}$ | Older mixed-precision. Limited range. |
+| BF16 | 16 | 1 | **8** | **7** | Same as FP32 | Modern mixed-precision default. |
+| FP8 (E4M3) | 8 | 1 | 4 | 3 | ~$10^{-3}$ to $10^{2}$ | Forward pass on H100/H200. |
+| FP8 (E5M2) | 8 | 1 | 5 | 2 | Same range as FP16 | Backward pass on H100/H200. |
+| FP4 (E2M1) | 4 | 1 | 2 | 1 | Tiny | Cutting-edge research. |
+
+The most important thing: **BF16 has the same range as FP32 but lower precision than FP16.** This trade — sacrificing precision for range — turns out to be exactly the right call for neural network training, where you need to handle gradients spanning many orders of magnitude but don't need 10 mantissa bits to represent any individual value.
+
+This is why BF16 is the modern default for training even though FP16 came first. FP16 was constantly underflowing on small gradients; BF16 doesn't.
+
+### Integer Formats: INT8, INT4, INT2
+
+Integer formats are simpler. With $n$ bits, you get $2^n$ distinct values, and they're spaced uniformly within whatever range you set:
+
+- INT8: 256 values
+- INT4: 16 values
+- INT2: 4 values
+
+To use integers for representing real-valued weights, you need a **scale factor** $s$ that maps integer space to real space:
+
+$$w_{\text{real}} = s \cdot w_{\text{int}}$$
+
+The scale factor is stored in higher precision (typically FP16 or FP32). This means INT8 quantization isn't *quite* 8 bits per weight — it's 8 bits per weight plus a scale factor amortized over some block of weights. We'll see how big that block is in a moment.
+
+### NF4: The Specialist
+
+[NF4](https://arxiv.org/abs/2305.14314) (NormalFloat 4-bit) is a non-uniform 4-bit format designed specifically for normally-distributed weights. Instead of spacing its 16 values uniformly, NF4 spaces them so each level has roughly equal probability mass under a standard normal. The result: about 4× less quantization error than uniform INT4 on actual transformer weights.
+
+NF4 is information-theoretically optimal for normal data at 4 bits. It's the foundation of QLoRA, and it's increasingly used as a generic 4-bit format for inference too.
+
+---
+
+## The Quantization Knobs
+
+Even within a fixed bit-width, several knobs determine how good your quantization is.
+
+### Symmetric vs Asymmetric
+
+A **symmetric** quantization scheme assumes the data is centered at zero. The mapping is just $w_{\text{real}} = s \cdot w_{\text{int}}$, with one scale factor and an integer range like $[-7, 7]$ (for 4-bit signed).
+
+An **asymmetric** scheme adds a *zero point*: $w_{\text{real}} = s \cdot (w_{\text{int}} - z)$. This lets the integer range be shifted, which is useful for activations after a ReLU — they're all non-negative, so a symmetric quantization wastes half its range on impossible values.
+
+Weights are typically symmetric (Gaussian-centered-at-zero). Activations are often asymmetric. Modern frameworks handle both transparently.
+
+### Per-Tensor vs Per-Channel vs Per-Group
+
+The key question: how many weights share a single scale factor?
+
+- **Per-tensor**: one scale factor for the entire weight tensor. Cheapest, but if any weight has an outlier-large magnitude, the scale gets pulled toward it and small weights lose precision.
+- **Per-channel**: one scale per output channel of the linear layer. Good middle ground; costs almost nothing extra (channels are typically thousands of values).
+- **Per-group**: one scale per group of, say, 64 or 128 weights along a single channel. Most precise; the standard choice for serious quantization. Adds slightly more overhead because you have more scale factors.
+
+The intuition: **finer-grained scale factors recover more precision because each one only has to fit a smaller, more uniform group of weights**. The cost is storing more scales. Modern PTQ methods like GPTQ and AWQ use per-group quantization with group sizes around 128.
+
+### Calibration Data
+
+Before quantizing a model, you need to know the *range* of values it produces. For weights, you have them — just inspect the trained tensors. For activations, you need to run the model on some inputs and observe what activation magnitudes show up.
+
+This pass is called **calibration**, and the data you use for it (the **calibration set**) matters. A typical calibration set is 128–1024 sequences from a representative distribution (e.g., a sample of pile data or your fine-tuning dataset). The activation ranges measured during calibration become the basis for the activation quantization scales.
+
+Quality of calibration data → quality of quantized model. Garbage in, garbage out.
+
+---
+
+## Training-Time Quantization
+
+Quantization during training is about **doing the math itself in lower precision**, with all the speed and memory benefits that implies. Modern GPUs (H100s, MI300s) have hardware support for FP8 matrix multiplies that's roughly 2× faster than BF16. If you can train in FP8, you train twice as fast.
+
+But training is harder than inference. Gradients require precision in places weights don't. Numerical stability is a real concern. So the methods are different.
+
+### Mixed-Precision Training (BF16) — The Default
+
+Almost every frontier model trained in 2024–2026 uses **BF16 mixed-precision** training. The recipe:
+
+- **Forward pass**: BF16
+- **Backward pass**: BF16
+- **Master weights** (the canonical copy of weights): FP32
+- **Optimizer state** (Adam's $m$ and $v$): FP32 or sometimes BF16 with care
+
+The idea is to do the bulk computation in BF16 (half the memory of FP32, similar throughput as FP16) while keeping the weights and optimizer state in higher precision so updates don't get lost in noise.
+
+A subtle point: when you do `weight_fp32 += learning_rate * gradient_bf16`, the gradient is so small relative to the weight that if you stored the weight in BF16, the addition would round to zero. (BF16 has only 7 mantissa bits — if `gradient` is more than $2^7 = 128$× smaller in magnitude than `weight`, the update vanishes.) FP32 master weights solve this.
+
+This is why BF16 mixed precision is the default — it's the sweet spot of speed, memory, and numerical safety for training.
+
+### FP8 Training — The Frontier
+
+The next step is **FP8 training**, where the matrix multiplications happen at 8 bits. NVIDIA's H100/H200 have native FP8 tensor cores that are roughly 2× faster than BF16. AMD's MI300 has similar support.
+
+The challenge is that 8 bits isn't enough range for everything. The recipe (used by NVIDIA's TransformerEngine and refined by frontier labs):
+
+- **Two FP8 formats**: E4M3 (more precision) for the forward pass, E5M2 (more range) for gradients in the backward pass. The backward pass needs more range because gradients can span more orders of magnitude.
+- **Scaling factors per tensor**: each FP8 tensor has an associated FP32 scale factor that's updated dynamically based on the observed data range. This effectively gives you tens of bits of dynamic range across the tensor while keeping individual values at 8 bits.
+- **Loss scaling**: gradients are multiplied by a large constant before backward, then divided back at the end, to push small gradient values out of FP8's underflow region.
+- **Some operations stay in BF16**: master weights, optimizer state, layer norms (very precision-sensitive), and the loss computation itself.
+
+### DeepSeek-V3's FP8 Recipe
+
+[DeepSeek-V3](https://arxiv.org/abs/2412.19437) (671B MoE) was the first widely-validated demonstration of full-scale FP8 pre-training at frontier model size. The paper documents several practical innovations beyond the textbook recipe:
+
+- **Tile-wise quantization** for activations (1×128 tiles for some layers) and **block-wise** for weights (128×128 blocks) — finer grouping than per-tensor, coarser than per-element
+- **Higher-precision accumulation**: GEMMs accumulate in FP32 internally, then write back to FP8. Without this, you accumulate quantization error across the multiply-accumulate operations of a single matmul and quality drops.
+- **Mixed FP8/BF16 routing**: precision-sensitive layers (embeddings, output projection, RMSNorm, MoE gating) stay in BF16; the bulk of attention and FFN computation runs in FP8.
+
+The result: DeepSeek-V3 trained with ~2× speed and ~50% memory savings vs BF16, with comparable quality. It's the proof that FP8 training works at frontier scale.
+
+### Quantization-Aware Training (QAT)
+
+A different beast: QAT is **training with the quantization you'll use at inference time built into the forward pass**. The idea is to let the model adapt to its quantization noise during training, so the inference-time quantized model is already what was optimized.
+
+The technique:
+- Forward pass: simulate quantization (compute outputs as if weights were quantized)
+- Backward pass: pretend the quantization didn't happen (use straight-through estimators for the gradient)
+
+QAT generally produces better-quality quantized models than post-training quantization, especially at very low bit-widths (INT4 and below). The cost is training compute — you have to actually train (or fine-tune) the model with QAT in the loop. Most production deployments use PTQ instead because the quality gap at 8 bits is usually small.
+
+QAT is making a comeback at the frontier of low-bit deployment (INT2, INT3, even ternary or binary), where PTQ struggles to maintain quality.
+
+---
+
+## Inference-Time Quantization (PTQ)
+
+This is the section most practitioners care about: I have a trained model, I want to deploy it at lower precision, what do I do?
+
+The class of methods is **post-training quantization** (PTQ). You take a finished model, run a calibration pass, and produce a quantized version — no retraining required.
+
+### The Naive Approach: Round-to-Nearest
+
+The simplest PTQ is just: pick scale factors per group, round each weight to the nearest representable value at your target bit-width. That's it.
+
+For 8-bit quantization, this works extremely well — within ~1% of the original model on most benchmarks. Once you go to 4 bits and below, naive rounding loses noticeable quality, and you need smarter methods.
+
+### GPTQ: Layer-wise Calibration
+
+[GPTQ](https://arxiv.org/abs/2210.17323) (Frantar et al. 2023) is the modern standard for INT4 weight quantization. The core insight: when you quantize a weight matrix, you should choose the rounding direction that *minimizes the output error* on calibration data, not just the rounding direction that minimizes the per-weight error.
+
+The mechanics:
+
+1. Compute the Hessian $H = X^T X$ (where $X$ is calibration activation data) for each linear layer
+2. For each column of the weight matrix, compute the optimal quantization that minimizes the output error, accounting for how rounding errors interact across columns through $H$
+3. Quantize column-by-column, using the closed-form solution that comes out of treating this as a small least-squares problem
+
+GPTQ produces 4-bit models with ~1% degradation versus the original on most LLMs. It's deterministic, requires only a few hundred calibration samples, and runs in minutes for models up to 70B.
+
+### AWQ: Protect the Salient Weights
+
+[AWQ](https://arxiv.org/abs/2306.00978) (Lin et al. 2023) takes a different angle. Observation: in a trained transformer, a small fraction of weights (about 1%) are *salient* — they correspond to channels that handle outlier activations. Quantizing them naively destroys those activation channels.
+
+AWQ's solution: **before quantizing, multiply the salient channels by a scaling factor** (and divide the corresponding activations by the same factor in the inverse linear layer). This pushes the salient weights' magnitudes up, so they survive quantization with less error. The activations get the scaling absorbed elsewhere in the network.
+
+AWQ tends to slightly outperform GPTQ on harder benchmarks (math, code) and is comparable on most others. Both are widely used.
+
+### SmoothQuant: Migrate Outliers Out of Activations
+
+[SmoothQuant](https://arxiv.org/abs/2211.10438) (Xiao et al. 2022) is targeted at the activation outlier problem. Activation outliers — particularly bad in larger LLMs — make activation quantization fail.
+
+SmoothQuant's trick: factor the difficulty out of the activations and into the weights. Specifically, replace the linear operation $y = Wx$ with $y = (W \cdot \text{diag}(s)) \cdot (\text{diag}(s)^{-1} x)$. This is mathematically identical, but now the activations $\text{diag}(s)^{-1} x$ have smaller magnitudes (no outliers) and the weights $W \cdot \text{diag}(s)$ absorb the difficulty. Weights are easier to quantize than activations, so we win.
+
+SmoothQuant is often used together with INT8 weight + INT8 activation quantization (W8A8) for end-to-end inference speedups, where naive activation quantization would fail.
+
+### NF4 for Inference
+
+We saw NF4 in [QLoRA](/blog/peft-lora). It also stands alone as an inference-time format. The QLoRA paper showed that 4-bit NF4 quantization of LLM weights produces models that are within ~1–2% of FP16 on standard benchmarks, and the bitsandbytes library makes deploying NF4 models trivially easy.
+
+The trade-off compared to GPTQ/AWQ: NF4 is faster to apply (just bitwise rounding to the NF4 levels, no calibration needed), but slightly lower quality at the same bit-width because it doesn't account for activation distributions.
+
+### GGUF and the llama.cpp Ecosystem
+
+A separate world worth mentioning: **GGUF** (formerly GGML) is the quantization format used by llama.cpp, the dominant CPU/edge inference engine. GGUF supports a zoo of quantization variants — Q4_0, Q4_K_M, Q5_K_M, Q6_K, Q8_0 — each a different combination of bit-width, group size, and per-group bookkeeping.
+
+The naming convention is opaque if you're not used to it:
+- The number is the bit-width
+- `K` means K-quants (a more sophisticated quantization scheme using row-wise mixed precision)
+- `M`, `S`, `L` are size variants (M = medium, etc.)
+
+For most users, **Q4_K_M** or **Q5_K_M** are the practical recommendations — they balance quality and size well. Q8_0 is essentially lossless.
+
+GGUF lives in its own ecosystem (llama.cpp + Ollama + LM Studio) and isn't directly compatible with HuggingFace Transformers, but it's how most "run a 70B model on your laptop" stories actually happen.
+
+### How Far Can You Go?
+
+The frontier is **2-bit and 1-bit quantization**. Recent methods like AQLM and QuIP# achieve 2-bit quantization with manageable quality loss for models above 7B. BitNet pushes the boundary further with native 1.58-bit ternary models trained from scratch.
+
+At 4 bits, the quality loss is small enough to be acceptable for most use cases. At 3 bits, you start seeing clear regressions on harder benchmarks. At 2 bits and below, you need either QAT or specialized methods (and the model gets noticeably worse on subtle tasks). For consumer deployment, 4-bit is the sweet spot. For absolute minimum-memory deployment, 2-bit research methods are catching up.
+
+### Method Comparison
+
+| Method | Bits | Calibration needed | Speed | Notes |
+|---|---|---|---|---|
+| Naive RTN | 8 | No | Fast | Works fine at 8 bits, breaks at 4 |
+| NF4 | 4 | No | Fast | Default for QLoRA training; good for inference too |
+| GPTQ | 4 | Yes (~128 samples) | Medium | Industry standard for INT4 |
+| AWQ | 4 | Yes | Medium | Often slightly better than GPTQ on math/code |
+| SmoothQuant | 8 (W+A) | Yes | Medium | When you need W8A8 for end-to-end speedup |
+| AQLM | 2 | Yes | Slow | Frontier 2-bit, requires longer calibration |
+| GGUF Q4_K_M | 4 (mixed) | Variable | Fast | llama.cpp ecosystem |
+
+---
+
+## Model Merging
+
+Quantization shrinks one model. Merging is the opposite operation: it takes *several* models and combines them into one.
+
+This sounds like it shouldn't work. We're talking about averaging the weights of independently fine-tuned neural networks. There's no theoretical guarantee that this produces a network that does anything useful. But empirically — under the right conditions — it does.
+
+### The Setup
+
+You have a base model $W_0$ and several fine-tuned variants $W_1, W_2, \ldots, W_k$ (all fine-tuned from the same $W_0$, each on different data). Can you produce a single model that has the capabilities of all of them?
+
+The naive approach is to simply average the weights:
+
+$$W_{\text{merged}} = \frac{1}{k} \sum_i W_i$$
+
+For models trained from the *same initialization*, this often works surprisingly well — they're in the same loss basin, and averaging produces a model that's still in that basin. For models trained from *different initializations*, averaging usually destroys both. The condition that makes merging work is **shared initialization**.
+
+### Task Vectors and Task Arithmetic
+
+A more useful framing comes from [Ilharco et al. 2023](https://arxiv.org/abs/2212.04089). Define a **task vector** for each fine-tune as the difference from the base model:
+
+$$\tau_i = W_i - W_0$$
+
+The task vector represents "what fine-tuning $i$ learned, on top of the base model." Now we can do arithmetic with task vectors:
+
+- **Add a capability**: $W_0 + \tau_i$ (just the regular fine-tune)
+- **Combine capabilities**: $W_0 + \tau_1 + \tau_2$ (merged model with both capabilities)
+- **Negate a behavior**: $W_0 - \tau_i$ (try to remove the behavior the fine-tune introduced — useful for unlearning experiments)
+- **Analogies**: $W_0 + (\tau_{\text{French}} - \tau_{\text{English}})$ (transfer the "French-ness" relative to English to the base model)
+
+This works partially. The first three are reliable; the last is more speculative. The key practical use case is the second one — combining multiple specialist fine-tunes into one generalist model.
+
+### Why Naive Merging Sometimes Fails
+
+If you fine-tune two models on conflicting tasks and just add their task vectors, the result can be worse than either. The two task vectors interfere — they update some of the same weights in opposite directions, and the average lies between two useful states without being either.
+
+This is the merging analog of catastrophic forgetting: if two task vectors disagree about how to update a weight, averaging produces something neither task wanted.
+
+### TIES: Trim, Elect Sign, Merge
+
+[TIES](https://arxiv.org/abs/2306.01708) (Yadav et al. 2023) addresses the conflict problem with three explicit steps:
+
+1. **Trim**: in each task vector, zero out the smallest-magnitude entries (keep only the top-k% of changes). The intuition: small changes are noise; large changes are signal.
+2. **Elect sign**: for each parameter, the merged model uses the sign of whichever task vector had the largest magnitude at that position. This avoids the "two opposing votes cancel" problem.
+3. **Merge**: average the (sign-aligned, trimmed) task vectors.
+
+TIES consistently improves over naive averaging when merging multiple specialist fine-tunes. It's the modern default for "merge several LoRA adapters into one model" in the open-source ecosystem.
+
+### DARE: Drop and Rescale
+
+[DARE](https://arxiv.org/abs/2311.03099) (Yu et al. 2023) takes a different angle: randomly drop entries of each task vector (set them to zero) with some probability, then rescale the surviving entries to compensate.
+
+This is essentially dropout applied to task vectors. The empirical result: most fine-tuning weight changes are *redundant* — you can drop a large fraction of them (90% or more) and rescale, and the resulting model performs similarly to the original fine-tune. After dropping, merging is much less prone to interference because most weights are "untouched" by each task vector.
+
+DARE is often used as a preprocessing step: apply DARE to each task vector, then merge with TIES (or naive averaging).
+
+### SLERP: Spherical Interpolation
+
+For merging exactly two models, [SLERP](https://en.wikipedia.org/wiki/Slerp) (spherical linear interpolation) is sometimes used. Instead of linearly interpolating $W = (1-t) \cdot W_1 + t \cdot W_2$, SLERP interpolates along a great circle in weight space.
+
+The intuition: if the two models live on a "shell" in weight space (similar magnitudes), linear interpolation goes through a less-magnitude point in the middle, which can be a worse model. Spherical interpolation stays on the shell.
+
+SLERP is most useful when merging two strong specialists and you want the result to feel like "halfway between" rather than a compromise. It's popular for merging open-source instruction-tuned models.
+
+### Model Soups
+
+A simpler observation: if you train the *same* model with several different hyperparameter configurations (different LRs, different seeds), and average the resulting weights, you often get a model that outperforms any individual training run.
+
+[Wortsman et al. 2022](https://arxiv.org/abs/2203.05482) called this a **model soup**. It's essentially ensemble averaging, but at the weight level instead of at the prediction level — which is much cheaper to deploy (one model instead of several).
+
+The conditions for model soups to work: shared initialization, similar training data, similar hyperparameters. When all three hold, the resulting models are in the same loss basin and averaging finds a flatter, more generalizable point in that basin.
+
+### LoRA Adapter Composition
+
+Model merging applies cleanly to LoRA adapters specifically. If you have several LoRA adapters $\Delta W_1, \Delta W_2, \ldots, \Delta W_k$ all on the same base model, you can:
+
+- **Merge sequentially**: $W = W_0 + \sum_i \Delta W_i$ (naive sum)
+- **Merge with weights**: $W = W_0 + \sum_i \alpha_i \Delta W_i$ (weighted sum, useful when one adapter is more relevant)
+- **Apply TIES**: handle interference between adapters explicitly
+- **Apply DARE**: drop redundant adapter weights before merging
+
+Multi-LoRA serving systems take this further by keeping adapters *unmerged* at inference time and selecting which ones to apply per request. (We'll get into that machinery in the inference series.)
+
+### When Merging Doesn't Work
+
+Merging has real limits:
+
+- **Different initializations**: averaging two models trained from different initial weights almost always produces a worse model than either.
+- **Highly conflicting tasks**: if two fine-tunes disagree fundamentally on how the model should behave, even TIES can't reconcile them.
+- **Very different fine-tuning durations**: a fine-tune trained for 10× more epochs has a much larger task vector; naive averaging will be dominated by it.
+- **Shifts in tokenizer or architecture**: any structural difference makes merging impossible.
+
+The practical rule: **merging works best when your fine-tunes are siblings** — same base model, similar fine-tuning recipe, related tasks. Merging an English instruction-tune with a coding fine-tune from the same base will probably work. Merging a Llama 3 fine-tune with a Mistral fine-tune will not.
+
+---
+
+## Putting It Together
+
+Quantization and merging are the two operations that get you more out of the same model.
+
+**Quantization**:
+- BF16 training is the floor — every modern frontier model uses it.
+- FP8 training is the frontier — DeepSeek-V3 demonstrated it works at scale.
+- For inference, 4-bit is the sweet spot. GPTQ and AWQ are the modern PTQ defaults; NF4 is a strong alternative; GGUF is the consumer/edge ecosystem.
+- Sub-4-bit (INT2, INT3) is research territory but rapidly improving.
+
+**Merging**:
+- Task vectors give you a clean abstraction for combining fine-tunes.
+- Naive averaging works for siblings; TIES + DARE handle conflicts.
+- LoRA adapters merge cleanly into the base model (or each other).
+- Don't try to merge models from different bases.
+
+Both are everywhere in modern LLM deployment. The 4-bit Llama you run on your laptop is GPTQ-quantized. The instruction-tuned model your favorite open-source community fine-tuned is probably a TIES-merged blend of several specialist fine-tunes, distributed in GGUF format. The frontier-lab model you query through an API was almost certainly trained in BF16 mixed precision and increasingly in FP8.
+
+Quantization and merging take a fixed budget of pre-training compute — the part that costs $50M and months on tens of thousands of GPUs — and squeeze more usefulness out of it. PEFT made fine-tuning cheap. Quantization makes deployment cheap. Merging makes capability composable. Together they're the toolkit that turned LLMs from artifacts of frontier labs into things you can actually run, modify, and deploy yourself.
+
+Next up is **alignment** — the methods that turn a model that follows instructions into a model humans actually prefer talking to. SFT teaches form; alignment teaches taste. The methods are different (and arguably more interesting) than anything we've covered so far.
+
+---
+
+## References
+
+### Quantization
+
+- **[QLoRA: Efficient Finetuning of Quantized LLMs](https://arxiv.org/abs/2305.14314)** (Dettmers et al., 2023) — Introduces NF4 and the 4-bit base + LoRA recipe.
+- **[LLM.int8(): 8-bit Matrix Multiplication for Transformers at Scale](https://arxiv.org/abs/2208.07339)** (Dettmers et al., 2022) — The first widely-adopted INT8 quantization for LLMs; introduced the activation outlier problem.
+- **[GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers](https://arxiv.org/abs/2210.17323)** (Frantar et al., 2023) — The Hessian-aware INT4 method.
+- **[AWQ: Activation-aware Weight Quantization](https://arxiv.org/abs/2306.00978)** (Lin et al., 2023) — Protect salient channels.
+- **[SmoothQuant: Accurate and Efficient Post-Training Quantization for LLMs](https://arxiv.org/abs/2211.10438)** (Xiao et al., 2022) — Migrate outliers from activations to weights.
+- **[FP8 Formats for Deep Learning](https://arxiv.org/abs/2209.05433)** (Micikevicius et al., 2022) — The E4M3/E5M2 spec.
+- **[DeepSeek-V3 Technical Report](https://arxiv.org/abs/2412.19437)** (DeepSeek-AI, 2024) — Full FP8 pre-training at frontier scale.
+- **[AQLM: Extreme Compression of Large Language Models via Additive Quantization](https://arxiv.org/abs/2401.06118)** (Egiazarian et al., 2024) — 2-bit PTQ.
+- **[BitNet b1.58: All Large Language Models are in 1.58 Bits](https://arxiv.org/abs/2402.17764)** (Ma et al., 2024) — Native 1.58-bit (ternary) training.
+
+### Model Merging
+
+- **[Editing Models with Task Arithmetic](https://arxiv.org/abs/2212.04089)** (Ilharco et al., 2023) — Task vectors and task arithmetic.
+- **[Model Soups](https://arxiv.org/abs/2203.05482)** (Wortsman et al., 2022) — Average weights of fine-tunes for free generalization.
+- **[TIES-Merging: Resolving Interference When Merging Models](https://arxiv.org/abs/2306.01708)** (Yadav et al., 2023) — Trim, elect sign, merge.
+- **[DARE: Drop And REscale](https://arxiv.org/abs/2311.03099)** (Yu et al., 2023) — Random dropping of task vector entries.
+
+---
+
+*Next up: [RLHF: Reward Models and PPO](/blog/rlhf-ppo) — turning a helpful model into a model humans actually prefer.*
 
 ---
 

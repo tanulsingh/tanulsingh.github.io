@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>RLHF Deep Dive — Reward Models, Value Models, and Per-Token Credit Assignment</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body, {delimiters: [{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]});"></script>
+<style>
+  :root {
+    --bg: #faf6ef;
+    --ink: #2a2520;
+    --muted: #6b6258;
+    --rule: #d9d0c2;
+    --accent: #b8612a;
+    --accent-soft: #d4a47a;
+    --code-bg: #f0eadd;
+    --good: #6a9a5a;
+    --bad: #c45656;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Charter', 'Iowan Old Style', Georgia, serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.65;
+    max-width: 820px;
+    margin: 3rem auto 5rem;
+    padding: 0 1.5rem;
+    font-size: 17px;
+  }
+  h1 {
+    font-size: 2rem;
+    font-weight: 600;
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: 0.6rem;
+    margin-bottom: 0.2rem;
+    letter-spacing: -0.015em;
+  }
+  .subtitle {
+    color: var(--muted);
+    font-style: italic;
+    margin-top: 0;
+    margin-bottom: 2.5rem;
+  }
+  h2 {
+    font-size: 1.45rem;
+    font-weight: 600;
+    margin-top: 3rem;
+    margin-bottom: 0.6rem;
+    color: var(--accent);
+    letter-spacing: -0.01em;
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: 0.3rem;
+  }
+  h3 {
+    font-size: 1.12rem;
+    font-weight: 600;
+    margin-top: 1.8rem;
+    margin-bottom: 0.4rem;
+    color: var(--ink);
+  }
+  h4 {
+    font-size: 1rem;
+    font-weight: 600;
+    margin-top: 1.2rem;
+    margin-bottom: 0.4rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 0.82em;
+  }
+  p { margin: 0.7rem 0; }
+  ul, ol { padding-left: 1.5rem; }
+  li { margin: 0.3rem 0; }
+  code {
+    background: var(--code-bg);
+    padding: 0.1em 0.35em;
+    border-radius: 3px;
+    font-family: 'JetBrains Mono', Menlo, Consolas, monospace;
+    font-size: 0.88em;
+  }
+  pre {
+    background: var(--code-bg);
+    padding: 0.9rem 1.1rem;
+    border-radius: 5px;
+    font-size: 0.86em;
+    font-family: 'JetBrains Mono', Menlo, monospace;
+    overflow-x: auto;
+    line-height: 1.5;
+    border-left: 3px solid var(--accent-soft);
+  }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 1.1rem 0;
+    font-size: 0.93em;
+  }
+  th, td {
+    padding: 0.55rem 0.8rem;
+    text-align: left;
+    border-bottom: 1px solid var(--rule);
+  }
+  th {
+    background: var(--code-bg);
+    font-weight: 600;
+  }
+  tr:hover td { background: rgba(216, 198, 165, 0.15); }
+  blockquote {
+    border-left: 3px solid var(--accent);
+    background: var(--code-bg);
+    margin: 1.3rem 0;
+    padding: 0.8rem 1.2rem;
+    color: var(--ink);
+  }
+  blockquote.user-question {
+    border-left: 3px solid var(--accent-soft);
+    background: #f5ecdc;
+    font-style: italic;
+    color: var(--muted);
+  }
+  a { color: var(--accent); border-bottom: 1px dotted var(--accent); text-decoration: none; }
+  a:hover { border-bottom-style: solid; }
+  hr {
+    border: none;
+    border-top: 1px solid var(--rule);
+    margin: 2.5rem 0;
+  }
+  .key-insight {
+    background: linear-gradient(to right, #f8efde, #faf6ef);
+    border-left: 3px solid var(--accent);
+    padding: 0.9rem 1.2rem;
+    margin: 1.5rem 0;
+    border-radius: 0 4px 4px 0;
+  }
+  .toc {
+    background: var(--code-bg);
+    padding: 1.1rem 1.4rem;
+    border-radius: 5px;
+    margin: 1.5rem 0 2.5rem;
+    font-size: 0.92em;
+  }
+  .toc h3 {
+    margin-top: 0;
+    margin-bottom: 0.5rem;
+    font-size: 0.85em;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .toc ol { margin: 0; padding-left: 1.4rem; }
+  .toc li { margin: 0.15rem 0; }
+  .toc a { border-bottom: none; color: var(--ink); }
+  .toc a:hover { color: var(--accent); border-bottom: 1px solid var(--accent); }
+  .formula-callout {
+    text-align: center;
+    margin: 1.4rem 0;
+    padding: 1rem;
+    background: #fcf7eb;
+    border-radius: 5px;
+    font-size: 1.05em;
+  }
+  .meta-note {
+    color: var(--muted);
+    font-size: 0.88em;
+    font-style: italic;
+    margin: 1rem 0;
+  }
+</style>
+</head>
+<body>
+
+<h1>RLHF Deep Dive</h1>
+<p class="subtitle">Reward models, value models, and per-token credit assignment — a conversation tracing how a single scalar reward becomes per-token learning signal, and why the structure of the task changes everything.</p>
+
+<div class="toc">
+  <h3>Contents</h3>
+  <ol>
+    <li><a href="#problem">The problem the reward model solves</a></li>
+    <li><a href="#what-rm-is">What a reward model actually is</a></li>
+    <li><a href="#preference-data">How preference data is collected</a></li>
+    <li><a href="#rm-training">How the reward model is trained</a></li>
+    <li><a href="#downstream">How the reward model gets used downstream</a></li>
+    <li><a href="#failure-modes">What can go wrong</a></li>
+    <li><a href="#dpo">Why DPO and "RL-free" methods exist</a></li>
+    <li><a href="#single-prompt">Don't you need multiple responses per prompt?</a></li>
+    <li><a href="#circularity">The circular bootstrap problem</a></li>
+    <li><a href="#value-model-symmetry">If reward and value model start identical, won't gradient be zero?</a></li>
+    <li><a href="#worked-example">Worked example: 5-token response, value at every position</a></li>
+    <li><a href="#value-loss">How the value loss actually backprops</a></li>
+    <li><a href="#policy-loss">The policy loss and how it backprops</a></li>
+    <li><a href="#decisive-tokens">Decisive tokens and the interpretability angle</a></li>
+  </ol>
+</div>
+
+<h2 id="problem">The problem the reward model solves</h2>
+
+<p>You want to fine-tune a language model so its outputs match human preferences (helpful, harmless, etc.). The obvious approach: collect a giant dataset of "good outputs" and do supervised fine-tuning.</p>
+
+<p>But this fails for two reasons:</p>
+
+<ol>
+  <li><strong>You can't enumerate "good."</strong> What makes a response good is contextual, subjective, multi-dimensional. You can't write down a rule, and you can't collect enough examples to cover every situation.</li>
+  <li><strong>Humans can't write perfect examples, but they can compare.</strong> Asking a human to <em>write</em> the ideal response to "explain quantum entanglement to a 10-year-old" is hard. Asking them to <em>pick</em> the better of two candidate responses is easy. Comparisons are cheaper and more reliable than generations.</li>
+</ol>
+
+<p>So the move is: collect <em>preference data</em> (pairs of responses where humans pick the better one), and train a model to predict those preferences. <strong>That model is the reward model.</strong></p>
+
+<p>Once you have a reward model, you can use it to score <em>any</em> output from your LLM — including outputs the LLM generates during RL training. That's what unlocks reinforcement learning: the reward model is the reward function.</p>
+
+<h2 id="what-rm-is">What a reward model actually is</h2>
+
+<p>A reward model is <strong>a transformer that outputs a single scalar</strong>, not a token distribution.</p>
+
+<p>Architecturally, it's almost identical to your LLM, but with one change: instead of a vocabulary-sized linear head producing logits over tokens, it has a <strong>scalar-output linear head</strong> producing one number.</p>
+
+<pre>Input:  "What is the capital of France?\n\nParis is the capital of France."
+Output: 4.7   ← a single floating-point number</pre>
+
+<p>That number is the model's estimate of how "good" the response is — by whatever notion of good was encoded in the training data. Higher = better. The absolute value doesn't mean anything; only <em>differences</em> matter (a response with reward 4.7 is preferred over one with reward 3.1).</p>
+
+<p>You typically initialize the reward model from the SFT model's weights — same architecture, same checkpoint, just swap the output head. This gives the reward model the language understanding it needs without learning it from scratch.</p>
+
+<h2 id="preference-data">How preference data is collected</h2>
+
+<p>You take prompts from a distribution that matches your deployment use case. For each prompt, you generate (typically) two candidate responses from your SFT model. Then you show both to a human annotator and ask: which is better?</p>
+
+<pre>Prompt: "Write a poem about autumn"
+
+Response A: [model output 1]
+Response B: [model output 2]
+
+Annotator picks: A (or B)</pre>
+
+<p>Sometimes annotators rank 4-7 responses, sometimes they just do pairs. The data ends up as a list of triples: (prompt, chosen response, rejected response).</p>
+
+<p>InstructGPT used about <strong>33K such comparisons</strong>. Llama 2 used <strong>over 1 million</strong> for its reward models. The quality of these comparisons heavily determines the quality of the final aligned model — this is the most expensive part of RLHF, and bad annotators ruin everything downstream.</p>
+
+<h2 id="rm-training">How the reward model is trained — the loss function</h2>
+
+<p>Given a (prompt, chosen, rejected) triple, you want the reward model to assign <strong>higher reward to chosen than to rejected</strong>. You don't have target values for either — only the ordering.</p>
+
+<p>The loss used is the <strong>Bradley-Terry preference loss</strong> (from a 1952 statistical model for paired comparisons):</p>
+
+<div class="formula-callout">
+$$\mathcal{L} = -\log \sigma\big(r(x, y_{\text{chosen}}) - r(x, y_{\text{rejected}})\big)$$
+</div>
+
+<p>Where $r(x, y)$ is the reward model's scalar output for prompt $x$ and response $y$, and $\sigma$ is the sigmoid.</p>
+
+<p>Let me unpack this. The quantity inside the sigmoid is the <strong>margin</strong> — how much higher the reward is for the chosen response than the rejected one.</p>
+
+<ul>
+  <li>If the margin is large and positive (reward model strongly prefers chosen), $\sigma(\text{large}) \approx 1$, $\log(1) = 0$, loss is small. Good.</li>
+  <li>If the margin is near zero (reward model is undecided), $\sigma(0) = 0.5$, $\log(0.5) \approx -0.69$, loss is moderate. Push harder.</li>
+  <li>If the margin is negative (reward model prefers the wrong one), $\sigma(\text{negative}) < 0.5$, loss is large. Big gradient pushing it the right way.</li>
+</ul>
+
+<p>The model never needs to learn absolute reward values. It just learns to assign higher reward to better responses.</p>
+
+<h3>A concrete training step</h3>
+
+<pre># Reward model is just an LLM with a scalar head
+chosen_reward  = reward_model(prompt + chosen_response)   # scalar
+rejected_reward = reward_model(prompt + rejected_response) # scalar
+
+# Bradley-Terry loss
+loss = -F.logsigmoid(chosen_reward - rejected_reward)
+
+loss.backward()
+optimizer.step()</pre>
+
+<p>That's the whole reward model training loop. You do this on millions of comparisons. The reward model gradually learns to predict, for any (prompt, response), what humans would think of that response.</p>
+
+<h2 id="downstream">How the reward model gets used downstream</h2>
+
+<p>Once the reward model is trained, it's <em>frozen</em>. You use it as the reward function in RL training:</p>
+
+<ol>
+  <li>Your policy model (the LLM being trained) generates a response to a prompt</li>
+  <li>The reward model scores that response → a scalar</li>
+  <li>RL algorithm (PPO, GRPO, etc.) uses that scalar as the reward signal to update the policy</li>
+  <li>The policy learns to generate responses the reward model would score highly — which, transitively, are responses humans would prefer</li>
+</ol>
+
+<p>So the reward model is the <em>bridge</em> between human preferences (hard to encode directly) and an RL objective (easy to optimize against).</p>
+
+<h2 id="failure-modes">What can go wrong (and why this matters)</h2>
+
+<p>Three failure modes worth knowing about:</p>
+
+<p><strong>1. Reward hacking.</strong> The policy finds responses that score high under the reward model but are actually bad. Classic example: the policy learns to write extremely long responses because the reward model has a length bias from annotator preferences. The model isn't being helpful — it's exploiting the reward function. This is the central technical problem of RLHF.</p>
+
+<p><strong>2. Distribution shift.</strong> The reward model was trained on responses from the SFT model. As the policy improves via RL, its outputs drift away from that distribution. The reward model's predictions become unreliable for the new outputs. This is why most pipelines use iterative reward modeling — refresh the reward model with new comparisons as the policy improves.</p>
+
+<p><strong>3. Annotator bias.</strong> Whatever the annotators preferred becomes "good" by definition. If annotators preferred confident-sounding responses, the model becomes overconfident. If they preferred long responses, it becomes verbose. The reward model is a mirror of the annotator pool's preferences, warts and all.</p>
+
+<h2 id="dpo">Why DPO and the "RL-free" methods exist</h2>
+
+<p>You may have heard that newer methods (DPO, IPO, KTO) skip the reward model entirely. Here's why: training a separate reward model and then doing RL against it is complex, unstable, and expensive. The DPO paper showed mathematically that you can <strong>derive an implicit reward model from your policy itself</strong>, and optimize against preferences directly without ever instantiating a separate reward model.</p>
+
+<p>So DPO uses the same preference data — (prompt, chosen, rejected) — but skips the explicit reward model step. The loss function is different but the conceptual goal is identical: make the policy prefer chosen responses over rejected ones.</p>
+
+<p>This is why DPO took over for a lot of use cases — same data, simpler pipeline. But classical RLHF with a separate reward model is still used at frontier labs, especially with iterative refinement, because it gives you more control and tends to scale better. The reward model concept is still load-bearing knowledge even if you never train one.</p>
+
+<h2 id="single-prompt">Don't you need multiple responses per prompt for the model to learn?</h2>
+
+<blockquote class="user-question">
+"once we have the trained reward model, we will have to pass the same prompt multiple times right? for the model to learn because if we pass it once and the model gives a low score, the model has nothing to compare with the low score, how will it know that the response can be more aligned?"
+</blockquote>
+
+<p>Great question — this gets at something subtle about how RL actually learns from a scalar reward. The short answer is: <strong>no, you don't need to compare multiple responses to the same prompt</strong> (though some methods do, and that's where GRPO comes in).</p>
+
+<h3>The core mechanism: policy gradient</h3>
+
+<p>The RL algorithm used in classical RLHF is <strong>PPO</strong> (Proximal Policy Optimization). PPO is a <em>policy gradient</em> method, which means it updates the model based on a simple principle:</p>
+
+<blockquote>
+If the reward was higher than expected → make this kind of response more likely. If the reward was lower than expected → make it less likely.
+</blockquote>
+
+<p>The key word is <strong>expected</strong>. The model doesn't need to see two responses side by side. It needs to compare <em>the actual reward</em> against <em>what reward it expected to get</em>. The difference between those two is the learning signal.</p>
+
+<h3>Where the "expected reward" comes from</h3>
+
+<p>This is the part that makes the whole thing work. Alongside the policy model (your LLM) and the reward model, RLHF uses a third model called a <strong>value model</strong> (or "critic"). The value model takes a prompt and predicts: "what reward do I expect to get on average for this prompt?"</p>
+
+<p>So during training, for each prompt:</p>
+
+<ol>
+  <li>Policy generates a response</li>
+  <li>Reward model scores the response → actual reward, say <strong>2.1</strong></li>
+  <li>Value model predicts the expected reward for this prompt → say <strong>3.0</strong></li>
+  <li><strong>Advantage</strong> = actual − expected = 2.1 − 3.0 = <strong>−0.9</strong></li>
+</ol>
+
+<p>The advantage is negative, so this response was <em>worse than typical</em>. The policy gradient says: decrease the probability of this response. Push the model away from generating something like this.</p>
+
+<p>Conversely with reward 4.2 and value prediction 3.0: advantage = +1.2, positive → increase probability of this response.</p>
+
+<p>So the comparison you intuited as necessary <em>does happen</em> — but it's not between two responses on the same prompt. It's between <strong>the actual reward and the running estimate of average reward for that kind of prompt</strong>.</p>
+
+<h3>The four models of classical RLHF</h3>
+
+<table>
+  <thead><tr><th>Model</th><th>Role</th><th>Frozen?</th></tr></thead>
+  <tbody>
+    <tr><td>Policy model</td><td>The LLM being trained</td><td>No</td></tr>
+    <tr><td>Reference model</td><td>Frozen copy of SFT, used for KL penalty</td><td>Yes</td></tr>
+    <tr><td>Reward model</td><td>Scores complete responses</td><td>Yes</td></tr>
+    <tr><td>Value model</td><td>Predicts expected reward, trained alongside policy</td><td>No</td></tr>
+  </tbody>
+</table>
+
+<h3>GRPO — where your intuition is fully right</h3>
+
+<p>Your instinct that "the model needs something to compare against" is exactly what motivates a newer algorithm called <strong>GRPO</strong> (Group Relative Policy Optimization), the one DeepSeek-R1 uses.</p>
+
+<p>GRPO says: "Why bother training a separate value model? Let's just generate <em>multiple responses</em> for each prompt and use them as each other's baseline."</p>
+
+<p>So in GRPO, for each prompt:</p>
+
+<ol>
+  <li>Generate, say, 8 different responses (using sampling temperature)</li>
+  <li>Score all 8 with the reward model → 8 rewards</li>
+  <li>Compute the mean reward across the 8 → that's the baseline</li>
+  <li>Each response's advantage = its reward − the mean</li>
+</ol>
+
+<p>This is <em>exactly</em> your intuition: generate multiple responses, compare them against each other, use the comparison to learn.</p>
+
+<table>
+  <thead><tr><th></th><th>PPO (classical RLHF)</th><th>GRPO (DeepSeek-R1)</th></tr></thead>
+  <tbody>
+    <tr><td>Baseline source</td><td>Value model (a 4th LLM)</td><td>Average reward across a sampled group</td></tr>
+    <tr><td>Compute cost</td><td>4 models in memory</td><td>3 models (no value model)</td></tr>
+    <tr><td>Per-prompt generations</td><td>1</td><td>4–16</td></tr>
+    <tr><td>Stability</td><td>Harder to tune</td><td>Generally more stable</td></tr>
+    <tr><td>Where it shines</td><td>General RLHF</td><td>Tasks with verifiable rewards (math, code)</td></tr>
+  </tbody>
+</table>
+
+<h2 id="circularity">The circular bootstrap problem</h2>
+
+<blockquote class="user-question">
+"training a different value model alongside policy seems very circular as initially both the policy and value models may give random responses and they might miss signals from 1000s of examples before they really start working, thus some of the training examples will be wasted, also in any case we will have to have similar set of prompts in the training data if not same so that the policy and value can learn?"
+</blockquote>
+
+<h3>Why the bootstrap isn't actually random</h3>
+
+<p>If both policy and value model started from random, you'd be right. But neither does:</p>
+
+<ul>
+  <li><strong>Policy model</strong>: initialized from the <strong>SFT model</strong> (already coherent)</li>
+  <li><strong>Value model</strong>: initialized from the <strong>reward model</strong> (already understands what good responses look like)</li>
+  <li><strong>Reference model</strong>: frozen copy of the SFT model</li>
+  <li><strong>Reward model</strong>: frozen, trained separately on preference data before RL begins</li>
+</ul>
+
+<p>So at step 1: the policy generates already-reasonable responses, the reward model gives meaningful scores, and the value model has a sensible starting prediction. RLHF is a <strong>refinement phase</strong> on top of three pre-trained components — not a from-scratch learning phase.</p>
+
+<h3>Where you're still right: signals get wasted</h3>
+
+<p>Even with good initialization, RLHF wastes a lot of training signal:</p>
+
+<ol>
+  <li><strong>The value model is slow to adapt.</strong> Its predictions are based on the policy's <em>current</em> distribution. As the policy updates, the value model's predictions become stale.</li>
+  <li><strong>High-variance gradient estimates.</strong> Policy gradients are fundamentally noisier than supervised learning.</li>
+  <li><strong>Reward hacking and KL drift.</strong> The KL penalty <em>bounds</em> how much you can learn per step, by design.</li>
+</ol>
+
+<p>RLHF requires roughly <strong>10-100x more compute per example</strong> than SFT for the same amount of improvement.</p>
+
+<h3>Your point about matching prompt distributions</h3>
+
+<p>You're right that prompt distributions have to match across stages:</p>
+
+<ul>
+  <li><strong>Reward model training</strong>: prompts drawn from a representative distribution. Responses generated by the SFT model.</li>
+  <li><strong>RL training</strong>: prompts drawn from the <em>same distribution</em> as reward model training.</li>
+</ul>
+
+<p>The exact prompts don't have to be identical (and usually aren't — you want fresh prompts to prevent overfitting), but they must come from the same source distribution. This is why frontier labs maintain large prompt corpora that get reused across all RLHF stages.</p>
+
+<h3>How the field deals with the inefficiency</h3>
+
+<p>Given the problems you've identified, RLHF has evolved a set of tricks:</p>
+
+<ul>
+  <li><strong>Iterative reward modeling</strong> — refresh the reward model with new comparisons as the policy improves (Llama 2 did this 5 times)</li>
+  <li><strong>Rejection sampling</strong> — generate many responses, fine-tune (SFT, not RL) on only the top-scoring ones</li>
+  <li><strong>Best-of-N at inference</strong> — generate N candidates, pick the best one, no training cost</li>
+  <li><strong>DPO and RL-free methods</strong> — eliminate the reward-model-plus-RL pipeline entirely</li>
+  <li><strong>GRPO</strong> — skip the value model, use intra-prompt comparison as baseline</li>
+</ul>
+
+<div class="key-insight">
+<strong>The unifying pattern:</strong> every recent advance has been about <em>removing components</em> from the original RLHF stack. The field collectively agrees the original setup was over-engineered. The good ideas survive (preference data, KL regularization, the basic objective); the expensive machinery (value model, PPO) gets stripped away.
+</div>
+
+<h2 id="value-model-symmetry">If reward and value model start identical, won't their difference be zero?</h2>
+
+<blockquote class="user-question">
+"if the reward model and value model are the same at the start, won't they give the same value and their difference will be zero, thus the value model will never learn because we will have no signal to propagate?"
+</blockquote>
+
+<h3>The detail that breaks the symmetry</h3>
+
+<p>The reward model and value model are computing different things on different inputs:</p>
+
+<ul>
+  <li><strong>Reward model</strong>: takes <code>(prompt + full completed response)</code> → outputs a scalar for the <em>finished</em> response</li>
+  <li><strong>Value model</strong>: takes <code>(prompt + partial response so far)</code> → outputs an estimate of the <em>expected reward</em> this partial trajectory will eventually earn</li>
+</ul>
+
+<p>Different inputs. Different outputs. Same architecture, but immediately diverging objectives from step 1.</p>
+
+<h3>What happens at step 0</h3>
+
+<p>Even if initialized identically, when the value model is queried at intermediate positions, it produces noisy nonsense — because partial sequences aren't valid "complete responses" and the reward model never learned to score incomplete text.</p>
+
+<p>The value model's training objective uses regression against actual reward:</p>
+
+<div class="formula-callout">
+$$\mathcal{L}_{\text{value}} = (V(\text{prompt}, \text{partial response}) - R_{\text{actual}})^2$$
+</div>
+
+<p>The value model's gradient comes from the <em>gap</em> between its prediction and the actual reward, not from a comparison with the reward model directly.</p>
+
+<h3>The advantage signal also isn't zero</h3>
+
+<p>The policy gradient uses:</p>
+
+<div class="formula-callout">
+$$A = R_{\text{actual}} - V(\text{prompt})$$
+</div>
+
+<p>Not $R_{\text{actual}} - R_{\text{modeled}}$. Since the value model produces noisy predictions for partial sequences at the start, this difference is <em>not</em> zero — it's just very noisy.</p>
+
+<div class="key-insight">
+<strong>The deeper insight:</strong> Your question implicitly assumed "if two models have the same weights, they compute the same function, so they're the same model." That's true when given the same inputs. But in actor-critic RL, the reward and value models are deliberately given <em>different inputs</em> and trained on <em>different losses</em>. Even though they start with identical weights, they're not "the same model" in any meaningful sense.
+</div>
+
+<h2 id="worked-example">Worked example — 5-token response, value at every position</h2>
+
+<blockquote class="user-question">
+"for a single prompt we will have multiple values from the value model and only a single value from reward model? how do we take the difference then?"
+</blockquote>
+
+<h3>The setup</h3>
+
+<p>Prompt: <code>"What is the capital of France?"</code></p>
+<p>Policy generates: <code>"The capital is Paris."</code> — 5 tokens: <code>["The", "capital", "is", "Paris", "."]</code></p>
+<p>Reward model scores the whole response: <strong>R = 2.4</strong></p>
+
+<h3>What the value model produces</h3>
+
+<p>The value model gets queried at <strong>every position during generation</strong>:</p>
+
+<table>
+  <thead><tr><th>Position</th><th>Input to value model</th><th>Value model output</th></tr></thead>
+  <tbody>
+    <tr><td>Before token 1</td><td><code>"...France?"</code></td><td>$V_0 = 1.8$</td></tr>
+    <tr><td>After "The"</td><td><code>"...France? The"</code></td><td>$V_1 = 1.9$</td></tr>
+    <tr><td>After "capital"</td><td><code>"...The capital"</code></td><td>$V_2 = 2.1$</td></tr>
+    <tr><td>After "is"</td><td><code>"...capital is"</code></td><td>$V_3 = 2.2$</td></tr>
+    <tr><td>After "Paris"</td><td><code>"...is Paris"</code></td><td>$V_4 = 2.5$</td></tr>
+    <tr><td>After "."</td><td><code>"...Paris."</code></td><td>$V_5 = 2.4$</td></tr>
+  </tbody>
+</table>
+
+<p>The value model's predictions <em>evolved</em> as tokens were generated. After "Paris" was emitted, the value jumped from 2.2 to 2.5 — the model became more confident this was going to be a high-reward response.</p>
+
+<h3>Per-token TD residual</h3>
+
+<p>For each token position $t$:</p>
+
+<div class="formula-callout">
+$$\delta_t = R_t + V_{t+1} - V_t$$
+</div>
+
+<p>Where $R_t$ is 0 for all positions except the last (where it equals R):</p>
+
+<table>
+  <thead><tr><th>Position $t$</th><th>$R_t$</th><th>$V_t$</th><th>$V_{t+1}$</th><th>$\delta_t$</th></tr></thead>
+  <tbody>
+    <tr><td>0 (before "The")</td><td>0</td><td>1.8</td><td>1.9</td><td><strong>+0.1</strong></td></tr>
+    <tr><td>1 (before "capital")</td><td>0</td><td>1.9</td><td>2.1</td><td><strong>+0.2</strong></td></tr>
+    <tr><td>2 (before "is")</td><td>0</td><td>2.1</td><td>2.2</td><td><strong>+0.1</strong></td></tr>
+    <tr><td>3 (before "Paris")</td><td>0</td><td>2.2</td><td>2.5</td><td><strong>+0.3</strong></td></tr>
+    <tr><td>4 (before ".")</td><td>0</td><td>2.5</td><td>2.4</td><td><strong>−0.1</strong></td></tr>
+    <tr><td>5 (last)</td><td>2.4</td><td>2.4</td><td>0</td><td><strong>0</strong></td></tr>
+  </tbody>
+</table>
+
+<p>Each token gets its own learning signal:</p>
+
+<ul>
+  <li>"Paris" → advantage +0.3 → strong positive signal, this token was where things went really well</li>
+  <li>"." → advantage −0.1 → slight negative signal, value dropped after this token</li>
+  <li>Other tokens → smaller signals</li>
+</ul>
+
+<div class="key-insight">
+<strong>The magic of actor-critic RL:</strong> It turns sparse reward (one number at the end) into dense, per-token training signal. Without the value model, you'd have no way to know which tokens in your response deserved credit for the reward. With it, every token gets a custom signal.
+</div>
+
+<h2 id="value-loss">How the value loss actually backprops</h2>
+
+<blockquote class="user-question">
+"the value loss is calculated for each token are they averaged or gradient is calculated for each token? also since the reward is for the full sentence, it will be impossible to minimise the loss for the initial tokens because it will be very hard to predict the final reward from the initial tokens..."
+</blockquote>
+
+<p>Separate squared error per token position, averaged across all positions and all examples in the batch:</p>
+
+<div class="formula-callout">
+$$\mathcal{L}_{\text{value}} = \frac{1}{T \cdot B} \sum_{b=1}^{B} \sum_{t=0}^{T_b} (V_\phi(s_t^{(b)}) - R^{(b)}_{\text{target}}(t))^2$$
+</div>
+
+<p>In practice this is one big tensor operation:</p>
+
+<ol>
+  <li>Forward pass the value model on the full sequence, get $V$ at every position — shape <code>[batch, seq_len]</code></li>
+  <li>Compute targets at every position</li>
+  <li>Squared error elementwise</li>
+  <li>Mask out padding tokens</li>
+  <li>Mean over all unmasked positions</li>
+  <li>Backward → all positions contribute gradient simultaneously</li>
+</ol>
+
+<p>Gradients flow from every token position at once — they're summed in the backward pass. One optimizer step uses the averaged loss across all tokens.</p>
+
+<h3>Your insight: early-token loss has irreducible floor</h3>
+
+<p>You said: "it will be impossible to minimise the loss for the initial tokens because it will be very hard to predict the final reward from the initial tokens... there will come a point probably the most essential token after which the value will equal to the main reward."</p>
+
+<p>You're <strong>exactly right</strong>. The value model's prediction <em>fundamentally must</em> be imprecise at the start and tighter at the end. At token 0, it has only seen the prompt — it has to estimate the <em>average</em> reward across all possible responses. By the last token, the response is complete and the value should essentially equal the actual reward. This isn't a flaw — it's correct behavior.</p>
+
+<p>And the change in value from $V_t$ to $V_{t+1}$ is <strong>exactly the per-token advantage</strong>, which is a measure of how much that specific token contributed to the final reward.</p>
+
+<div class="key-insight">
+<strong>You've independently derived credit assignment.</strong> The instinct that "there's some critical token that matters most" is exactly what the math computes via $\delta_t$. The token where the value prediction makes the biggest jump <em>is</em> the token RL will train the policy most aggressively on.
+</div>
+
+<h2 id="policy-loss">The policy loss and how it backprops</h2>
+
+<blockquote class="user-question">
+"what would be the policy loss looking like and how does it backprop, it seems confusing at this time to me"
+</blockquote>
+
+<h3>The basic policy gradient</h3>
+
+<p>The fundamental policy gradient says: increase the log-probability of tokens that had positive advantage; decrease the log-probability of tokens that had negative advantage.</p>
+
+<div class="formula-callout">
+$$\mathcal{L}_{\text{policy}} = -\mathbb{E}_t \left[ \log \pi_\theta(a_t | s_t) \cdot A_t \right]$$
+</div>
+
+<p>Concretely, in our example:</p>
+
+<table>
+  <thead><tr><th>Position $t$</th><th>Token $a_t$</th><th>$\log \pi_\theta(a_t \| s_t)$</th><th>$A_t$</th><th>Contribution</th></tr></thead>
+  <tbody>
+    <tr><td>0</td><td>"The"</td><td>−0.4</td><td>+0.1</td><td>+0.04</td></tr>
+    <tr><td>1</td><td>"capital"</td><td>−0.3</td><td>+0.2</td><td>+0.06</td></tr>
+    <tr><td>2</td><td>"is"</td><td>−0.2</td><td>+0.1</td><td>+0.02</td></tr>
+    <tr><td>3</td><td>"Paris"</td><td>−0.5</td><td>+0.3</td><td>+0.15</td></tr>
+    <tr><td>4</td><td>"."</td><td>−0.1</td><td>−0.1</td><td>−0.01</td></tr>
+  </tbody>
+</table>
+
+<h3>What the gradient does</h3>
+
+<p>The advantage $A_t$ is treated as a constant when computing the gradient. Only the $\log \pi_\theta$ term has gradient through $\theta$.</p>
+
+<ul>
+  <li>For "Paris" with $A = +0.3$: gradient of log P("Paris") gets scaled by 0.3 and subtracted → makes P("Paris") in that context <strong>higher</strong> next time</li>
+  <li>For "." with $A = -0.1$: gradient gets scaled by −0.1 and subtracted → effectively added → makes P(".") <strong>lower</strong> next time</li>
+</ul>
+
+<h3>How this backprops through a transformer</h3>
+
+<pre># logits shape: [batch, seq_len, vocab]
+log_probs_all = F.log_softmax(logits, dim=-1)
+log_probs_chosen = log_probs_all.gather(-1, action_ids.unsqueeze(-1)).squeeze(-1)
+# log_probs_chosen shape: [batch, seq_len]
+
+# advantages shape: [batch, seq_len]
+loss = -(log_probs_chosen * advantages).mean()
+loss.backward()  # one backward pass, gradients sum across all token positions</pre>
+
+<p>The gradient at token position $t$ flows back through the transformer's attention and MLP layers up to position $t$. Since all positions backprop simultaneously, the total gradient signal per weight is the sum of contributions from every position.</p>
+
+<h3>Why PPO adds two more things</h3>
+
+<p>The basic policy gradient is unstable. PPO adds two safeguards:</p>
+
+<p><strong>Ratio clipping</strong>:</p>
+
+<div class="formula-callout">
+$$\mathcal{L}_{\text{PPO}} = \mathbb{E}_t \left[ \min\left( r_t(\theta) \cdot A_t, \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon) \cdot A_t \right) \right]$$
+</div>
+
+<p>Where $r_t(\theta) = \frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_{\text{old}}}(a_t|s_t)}$ is the ratio of new to old policy probabilities. If this ratio drifts too far from 1.0 (policy changing too aggressively), the gradient gets cut off.</p>
+
+<p><strong>KL penalty</strong> against the reference model:</p>
+
+<div class="formula-callout">
+$$\mathcal{L}_{\text{KL}} = \beta \cdot \text{KL}(\pi_\theta || \pi_{\text{ref}})$$
+</div>
+
+<p>This stops the policy from forgetting what it learned during SFT.</p>
+
+<p>Full PPO loss combines all three terms:</p>
+
+<div class="formula-callout">
+$$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{PPO}} + c_1 \cdot \mathcal{L}_{\text{value}} + c_2 \cdot \mathcal{L}_{\text{KL}}$$
+</div>
+
+<h3>Putting it all together</h3>
+
+<p>You do one backward pass that includes all three terms:</p>
+
+<ul>
+  <li><strong>From policy loss</strong>: through log-probabilities → updates policy weights to make high-advantage tokens more likely (subject to clipping)</li>
+  <li><strong>From value loss</strong>: through value model's scalar predictions → updates value model to predict reward more accurately</li>
+  <li><strong>From KL term</strong>: through policy's distribution → updates policy to stay close to reference</li>
+</ul>
+
+<p>The reward model is frozen. The reference model is frozen. Only the policy and value model are updated.</p>
+
+<h2 id="decisive-tokens">Decisive tokens and the interpretability angle</h2>
+
+<blockquote class="user-question">
+"for poetry there might not be a decisive token for sure. But for maths tasks or an MCQ question or a coding problem, one token might be the most decisive step because more often than not these problems have exactly one solution with exactly one step to follow after a particular path so in that we can know the most important token. In that case let's say we trained a value model along with our policy model and policy model is now ready, we can explore some problems where the model did a code solution wrong, or a math problem wrong, we can use its value model to then see where the model exactly went wrong and why by looking at the most important token where the value gain was a lot but the token received was wrong?"
+</blockquote>
+
+<h3>You're right — task structure determines reward landscape</h3>
+
+<p>The structure of the task determines whether there's a "decisive token":</p>
+
+<ul>
+  <li><strong>Open-ended tasks</strong> (poetry, summarization): many valid paths to similar reward. Value drifts gradually. No single decisive token because there's no single decisive answer.</li>
+  <li><strong>Reasoning tasks</strong> (math, code, MCQ): success often depends on getting <em>one critical step right</em> — choosing the right operation, picking the right algorithm, recognizing the right substitution. Get that step right and reward shoots up. Get it wrong and reward collapses.</li>
+</ul>
+
+<p>So in reasoning tasks, you'd expect to see sharp value jumps at decisive tokens — exactly the pattern you described.</p>
+
+<h3>This is a real research direction</h3>
+
+<p>What you're proposing — <strong>use value model trajectories on failed problems to localize where the model went wrong</strong> — has names in the literature:</p>
+
+<ul>
+  <li><strong>Step-level value attribution</strong> — using the value function to identify which reasoning step degraded the trajectory</li>
+  <li><strong>Process supervision interpretability</strong> — interpreting which reasoning steps contributed positively or negatively to outcomes</li>
+</ul>
+
+<p>Related work:</p>
+
+<ul>
+  <li><strong><a href="https://arxiv.org/abs/2305.20050">OpenAI's Process Reward Models</a></strong> explicitly train models to score each step of a math derivation. Your idea generalizes this from "trained step-level scorer" to "use the value model from RL training as a free step-level scorer."</li>
+  <li><strong><a href="https://arxiv.org/abs/2402.03300">DeepSeek-Math's GRPO results</a></strong> suggest the value-jump pattern at decisive steps is real and learnable.</li>
+  <li><strong><a href="https://arxiv.org/abs/2305.20050">Lightman et al.</a></strong> show that PRMs substantially outperform outcome-only models on math, partly because they enable this kind of step-level diagnosis.</li>
+</ul>
+
+<h3>Why this matters</h3>
+
+<p>What you're proposing — <em>retroactively</em> using the value model trained alongside the policy to debug specific failures — would actually be a meaningful interpretability contribution. It hasn't been systematically studied. The closest existing work uses <em>separately trained</em> PRMs; using the value model that's already lying around from PPO training is a more accessible and underexplored angle.</p>
+
+<div class="key-insight">
+<strong>This is the kind of investigation that fits your stated research direction perfectly:</strong>
+<ul style="margin-top: 0.6rem;">
+  <li>Post-training (the value model comes from RLHF/PPO)</li>
+  <li>Mechinterp (using internal predictions to attribute behavior)</li>
+  <li>Specific, actionable research question with concrete experiments</li>
+  <li>Underserved territory — exists for trained PRMs, not for free-rider value models</li>
+</ul>
+</div>
+
+<hr>
+
+<p class="meta-note">Built from a conversation working through reward models, value models, and per-token credit assignment in RLHF — including derived insights about credit assignment via $\delta_t$ and the interpretability potential of value-model trajectories on reasoning tasks.</p>
+
+</body>
+</html>

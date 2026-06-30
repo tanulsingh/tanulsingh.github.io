@@ -1,10 +1,10 @@
 ---
 title: "Distributed Training: Making It Fit"
-date: "2026-05-25"
+date: "2026-06-23"
 tags: ["LLM Training", "Distributed Systems", "FSDP", "Tensor Parallelism", "Pipeline Parallelism", "The Loss Landscape of LLM Training"]
 author: "Tanul Singh"
-description: "How to train a model that doesn't fit on one GPU — data parallelism, tensor parallelism, pipeline parallelism, ZeRO, FSDP, and the 3D recipes used by Llama and DeepSeek."
-summary: "A 400B parameter model needs 800GB just for weights in FP16. This post breaks down every parallelism strategy — what's sharded, what's replicated, what's communicated — and how frontier labs combine them into 3D/5D recipes that train across thousands of GPUs."
+description: "Why a 70B+ model can't be trained on one GPU, and the recipe of parallelism strategies that solves it. Data, tensor, pipeline, sequence, and expert parallelism — the math, the trade-offs, and how frontier labs combine them into 3D/4D recipes that train across tens of thousands of GPUs."
+summary: "A 70B parameter model in BF16 with Adam needs ~890GB of GPU memory just to take one gradient step. Modern GPUs have 80GB. This post walks through every parallelism strategy that closes that gap — what gets sharded, what gets replicated, what gets communicated — and how Llama 3 combined four of them simultaneously to train on 16,000 H100s."
 featured: true
 draft: true
 ---
@@ -15,23 +15,291 @@ draft: true
 
 ---
 
-## Coming Soon
+In the [pre-training post](/blog/llm-pretraining), we covered the *what* and *why* of pre-training — the objective, the data, the scaling laws, the recipe. We breezed past the question of *where* it actually runs.
 
-Topics to cover:
-- Memory arithmetic (params + grads + optimizer states + activations)
-- Data Parallelism → DDP → ZeRO (1/2/3) → FSDP/FSDP2
-- Tensor Parallelism (Megatron column/row splits)
-- Pipeline Parallelism (GPipe, 1F1B, zero-bubble)
-- Sequence/Context Parallelism (Ring Attention)
-- 3D/5D parallelism recipes
-- Communication primitives and overlap
-- Gradient checkpointing / activation recomputation
-- CPU/NVMe offloading
-- Fault tolerance, async checkpointing
+The answer is: not on one GPU. Not on ten. Not on a hundred. A frontier pre-training run uses **tens of thousands of GPUs** in parallel, all training the same model, for months. Llama 3 405B used 16,384 H100s. GPT-4 reportedly used ~25,000 A100s. The next generation of frontier models will use 100,000+ accelerators on Blackwell-class hardware.
+
+The interesting question isn't "how do you spread work across many GPUs?" — that's just data parallelism, which has been routine since 2014. The interesting question is: **how do you train a model that's too big to fit on a single GPU at all?**
+
+This post walks through the answer end-to-end. Five different ways to parallelize, what each one shards and what it communicates, and how frontier labs combine them into recipes that train across entire data centers.
 
 ---
 
-*Next up: [The Numerics: Precision, Optimizers, and Stability](/blog/training-numerics)*
+## The Memory Wall
+
+To understand why distributed training is hard, you have to understand the memory budget at scale.
+
+Take a 70B parameter model. In BF16, that's:
+
+- **Parameters**: 70B × 2 bytes = **140 GB**
+
+Already, this fits on no single GPU. The H100 with 80 GB HBM3 is the largest commodity card you can buy; 70B's parameters alone are 1.75× larger.
+
+But that's only the start. To *train* the model with Adam, you also need:
+
+- **Gradients** (one per parameter): 140 GB in BF16
+- **Optimizer state** (Adam keeps two moments per parameter, in FP32 for stability): 70B × 8 bytes = **560 GB**
+- **Activations** (intermediate values for backprop, sized by batch and sequence length): typically 50–200 GB depending on configuration
+
+Adding these up: **~890 GB minimum** to take one gradient step on a 70B model. That's roughly **11 H100s worth of memory** just for the model state — before you've even started thinking about how to do the actual computation.
+
+Now scale it up. A 405B model needs ~5 TB of state. A 1T model needs ~13 TB. The compute requirements grow proportionally — billions of multiply-accumulates per token, trillions of tokens to process. At a certain scale, you're not training on a "computer" anymore; you're training on a building.
+
+The job of distributed training is to take this enormous training problem and split it across enough hardware to fit. There's no single right way to do it — instead, there are several *axes* you can split along, each with different trade-offs.
+
+---
+
+## Data Parallelism: The Easy Win
+
+The simplest case. You have $N$ GPUs and a batch of training examples. Split the batch across the GPUs — each one processes its own subset of examples. After the forward and backward passes, average the gradients across GPUs (using an all-reduce communication primitive), then take an optimizer step.
+
+This is **data parallelism**. It's been the default for distributed deep learning for over a decade. It works beautifully when:
+
+1. The full model fits on a single GPU
+2. The batch size is large enough to split meaningfully across $N$ GPUs
+
+Both assumptions break for modern LLMs. The model doesn't fit. And even if you could fit a small model and shard the batch, you'd need impossibly large batches to keep the gradients meaningful at scale.
+
+But data parallelism is still the *outermost* layer of every modern distributed training recipe. Once you've cleverly fit the model on a *group* of GPUs (using the techniques below), you can replicate that group $N$ times and run them in data parallel. So even though it's not sufficient on its own, it's always part of the picture.
+
+The PyTorch implementation is **DistributedDataParallel** (DDP). Each GPU has a complete copy of the model. Gradients are averaged across GPUs after every backward pass, using NCCL's all-reduce. Simple, fast, ubiquitous — but useless once your model exceeds one GPU.
+
+---
+
+## ZeRO and FSDP: Sharding the Replicated Stuff
+
+[ZeRO](https://arxiv.org/abs/1910.02054) (Rajbhandari et al., DeepSpeed, 2019) and the very similar **FSDP** (Fully Sharded Data Parallel) — PyTorch's native implementation — observe something important: in plain DDP, every GPU stores a *full* copy of the parameters, gradients, and optimizer state. With $N$ GPUs, you're storing $N$ redundant copies of the heaviest things in memory.
+
+ZeRO/FSDP shard the redundant pieces across GPUs. There are three "stages":
+
+| Stage | What's sharded | Memory savings | Communication added |
+|---|---|---|---|
+| ZeRO-1 / FSDP-O | Optimizer state (Adam's $m$ and $v$) | ~4× | None |
+| ZeRO-2 / FSDP-OG | + Gradients | ~8× | None |
+| ZeRO-3 / FSDP-OGW | + Parameters | ~$N$× | All-gather per layer |
+
+ZeRO-3 (full sharding) gives you near-linear memory scaling: with 8 GPUs, each stores 1/8 of the optimizer state, 1/8 of gradients, 1/8 of parameters. The cost is communication — when you need to do a forward pass on a layer, you have to gather its weights from across the GPUs first ("all-gather"), then drop them after the backward pass.
+
+The thing that makes FSDP work in practice is **overlap**. While GPU $A$ is doing the forward pass on layer 5, the parameters for layer 6 are already being all-gathered in the background. By the time layer 5 finishes, layer 6's weights are ready. With careful kernel scheduling, the all-gather cost is largely hidden behind compute.
+
+In practice, FSDP works wonderfully for models up to a few hundred billion parameters. For very wide models — where even one layer's weights can exceed a single GPU's memory during the gather — you need something stronger.
+
+---
+
+## Tensor Parallelism: Sharding the Layer Itself
+
+[Tensor parallelism](https://arxiv.org/abs/1909.08053) (Megatron-LM, NVIDIA 2019) is a fundamentally different idea. Instead of sharding *across* layers, it shards *within* layers. A single matrix multiplication is split across multiple GPUs, each computing a piece of the output.
+
+A standard transformer linear layer is $y = xW$, where $x$ is input and $W$ is the weight matrix. Tensor parallelism splits $W$ across $K$ GPUs and rearranges the math so each GPU computes a partial result. Two flavors:
+
+**Column-wise sharding**: split $W$ along its output dimension. Each GPU has $W_i$ (a "column slice" of $W$) and computes $y_i = x W_i$. The full output is the concatenation of all $y_i$.
+
+**Row-wise sharding**: split $W$ along its input dimension. Each GPU has $W_i$ (a "row slice") and computes $y_i = x_i W_i$ where $x_i$ is a slice of the input. The full output is the *sum* of all $y_i$ — which requires an all-reduce.
+
+Megatron's brilliant contribution was the observation that **the FFN sublayer of a transformer can be split column-wise then row-wise back-to-back**, and the **attention sublayer can be split per-head** — both in ways that minimize communication.
+
+For attention with $H$ heads, splitting across $K=H$ GPUs is natural: each GPU handles its own heads' Q, K, V, and the heads' outputs are concatenated. One all-reduce at the end per sublayer.
+
+For FFN ($y = \sigma(x W_1) W_2$): split $W_1$ column-wise (no communication needed) and $W_2$ row-wise. The intermediate activations after the first matmul are sharded across GPUs, but the final output of the second matmul has to be summed — one all-reduce per FFN.
+
+The cost is two all-reduces per transformer layer (one for attention, one for FFN). Each all-reduce *blocks* the forward pass — you can't proceed until everyone's contribution arrives. This means tensor parallelism is **bandwidth-hungry**. The all-reduces happen at every layer, every forward pass, every backward pass. The communication has to be very fast, which means TP groups are typically constrained to fit *within a single server* — where GPUs talk over NVLink at hundreds of GB/s, not over InfiniBand at tens.
+
+In Llama 3's recipe, **TP=8**: each tensor-parallel group is exactly the 8 GPUs in one Grand Teton server, connected by NVLink. The TP group never spans multiple servers.
+
+---
+
+## Pipeline Parallelism: Sharding Across Layers
+
+The third axis: split the *layers* of the model across GPUs. GPU 1 has layers 1–4, GPU 2 has layers 5–8, and so on.
+
+This is **pipeline parallelism**, and the naive version is bad. If GPU 2 is waiting for GPU 1 to finish layer 1–4 on a batch, then GPU 3 is waiting for GPU 2, then GPU 4 for GPU 3 — only one GPU is active at any time. The other GPUs sit idle, which is the opposite of what we wanted.
+
+### Pipelining: Multiple Microbatches in Flight
+
+The fix is to break the batch into microbatches and pipeline them. While GPU 2 is processing microbatch 1's forward pass on layer 5–8, GPU 1 can already be processing microbatch 2's forward pass on layer 1–4. By the time microbatch 1 finishes the full pipeline, microbatches 2, 3, 4 are all somewhere in the middle.
+
+The result looks like a Gantt chart: GPU 1 stays busy doing forward and backward passes on different microbatches; GPU 2 is busy a step later; GPU 3 a step later than that. This is **GPipe** (Huang et al. 2018).
+
+### The Bubble Problem
+
+There's a catch. At the start and end of every batch, the pipeline isn't full — some GPUs are idle while others are still ramping up or winding down. This idle time is called the **bubble**, and it's wasted work.
+
+For a pipeline of $P$ stages and $M$ microbatches, the bubble fraction is approximately $(P-1) / M$. To make this small, you need many microbatches per batch — which constrains how you set up your global batch size.
+
+### 1F1B: Reducing Activation Memory
+
+Naive GPipe also has a memory problem: activations for *all* in-flight microbatches need to be stored on the GPU until the backward pass for that microbatch completes. With many microbatches in flight, activation memory explodes.
+
+The fix is **1F1B (one-forward-one-backward) scheduling** ([PipeDream](https://arxiv.org/abs/1806.03377), Narayanan et al. 2019). After the pipeline fills, alternate forward and backward passes on each GPU. This keeps activation memory bounded — at any moment, each GPU has only $P$ in-flight microbatches' activations to track, regardless of total batch size.
+
+### Interleaved Pipeline: Reducing the Bubble
+
+A further refinement: instead of putting layers 1–4 on GPU 1 and layers 5–8 on GPU 2, put layers 1, 3, 5, 7 on GPU 1 and layers 2, 4, 6, 8 on GPU 2 (i.e. interleave them). Now microbatches "bounce" between GPUs more frequently, and the bubble is smaller per pipeline iteration.
+
+This is the **interleaved 1F1B schedule**, used by Megatron and Llama 3. With $V$ "virtual stages" per GPU, the bubble fraction drops to roughly $(P-1) / (V \cdot M)$ — much smaller for any fixed microbatch count. More recent work on **zero-bubble pipelining** further splits the backward pass into compute-input-grad and compute-weight-grad phases that can be reordered to nearly eliminate the bubble entirely.
+
+### When to Use Pipeline Parallelism
+
+Pipeline parallelism communicates via point-to-point sends (each GPU sends activations to the next, and gradients back) rather than all-reduces. The communication volume is much lower than tensor parallelism — only the activations at layer boundaries cross the network.
+
+This makes pipeline parallelism the right tool for **crossing server boundaries**. Llama 3 used **PP=16** — a pipeline 16 stages deep, with each stage running on its own server (or pair of servers for TP). The pipeline crossed many physical machines, and the communication cost was tolerable because the per-layer activations are small.
+
+---
+
+## Sequence and Context Parallelism: Sharding the Sequence
+
+Long context lengths blow up activations. A single attention layer has activation memory that scales as $O(N^2)$ in the sequence length — at $N = 128{,}000$ tokens, the attention matrix alone is 16 billion entries per head per layer.
+
+To train at very long context, we need to shard the *sequence dimension* itself. This is **sequence parallelism** or **context parallelism** (the terms are sometimes used differently in the literature; we'll treat them as a single idea here).
+
+Each GPU holds a slice of the sequence. For most operations (FFN, normalization), this is trivial — they're token-wise, so each GPU just processes its tokens.
+
+The interesting case is attention, which is *sequence-wide*. To compute attention for a query at position $i$, you need keys and values from *all* positions, not just the slice on your GPU. The solution is to circulate the keys and values around the sequence-parallel group:
+
+- Each GPU computes attention for its query slice against its own key/value slice
+- Then keys and values rotate to the next GPU in the group
+- Each GPU updates its partial attention results
+- Repeat until each query has seen all keys/values
+
+This is **Ring Attention** ([Liu et al. 2023](https://arxiv.org/abs/2310.01889)). The communication overhead is structured — KVs flow around the ring — and overlaps with computation. Combined with FlashAttention's tiled softmax, the whole thing runs without ever materializing the $N \times N$ attention matrix on any single GPU.
+
+Llama 3's long-context training phase used **CP=16**, sharding 128K-token sequences across 16 GPUs. That's how they trained at 128K context without each GPU exploding under quadratic activation memory.
+
+---
+
+## Expert Parallelism: Sharding the Mixture-of-Experts
+
+Mixture-of-Experts (MoE) models like DeepSeek-V3 (671B) and Mixtral 8×22B have a special structure: their FFN layers contain many "experts" (separate FFN modules), and each token only activates a few of them. This means the model has many parameters but a sparse compute pattern.
+
+For these models, **expert parallelism** is natural: place each expert on a different GPU. When tokens are routed to their assigned experts, the activations get routed across the network to the right GPU, computed there, and routed back.
+
+The communication pattern is **all-to-all**: every GPU sends some tokens to every other GPU based on the routing decisions. This is expensive — all-to-all is one of the most bandwidth-hungry collective operations — but it's the only way to fit a sparse model across many GPUs without replicating the experts.
+
+DeepSeek-V3 used a sophisticated routing strategy with **expert parallelism** as a top-level axis to support its 671B / 256-expert architecture, alongside tensor and pipeline parallelism for the dense parts. The routing imbalance (some experts get more tokens than others) is itself a research problem — DeepSeek's "auxiliary-loss-free" load balancing is one of the recent innovations there.
+
+---
+
+## Combining Them: 3D, 4D, ND Parallelism
+
+No single axis is sufficient at frontier scale. Real recipes combine many:
+
+- **Data parallelism** to use lots of GPUs in parallel
+- **Tensor parallelism** to fit a wide layer
+- **Pipeline parallelism** to fit a deep stack of layers
+- **Sequence/context parallelism** for long sequences
+- **Expert parallelism** for MoE models
+
+The grouping forms a **multi-dimensional grid** of GPUs. If you have TP=8, PP=16, DP=128, your training run uses $8 \times 16 \times 128 = 16{,}384$ GPUs. Each GPU has a position in the 3D grid: a TP rank, a PP rank, a DP rank.
+
+### The Llama 3 Recipe
+
+Llama 3 405B trained on 16,384 H100s using **4D parallelism**. The Meta paper documents the exact configuration:
+
+| Axis | Size | What's sharded | Communication |
+|---|---|---|---|
+| TP | 8 | Within-layer matmul | NVLink (within server) |
+| CP | 1 → 16 | Sequence (long-context phase only) | NVLink |
+| PP | 16 | Across layers | InfiniBand (between servers) |
+| DP/FSDP | 128 | Outer batch parallelism + parameter sharding | InfiniBand |
+
+The order matters: the *innermost* axis needs the fastest communication (NVLink). The *outermost* tolerates slow communication (Ethernet/InfiniBand). Llama 3 placed TP and CP innermost (NVLink-bandwidth), PP in the middle (point-to-point InfiniBand sends), and FSDP outermost (slow async all-reduces and parameter gathers).
+
+The result was 38–43% Model FLOPs Utilization — meaning the GPUs spent that fraction of wall-clock time on actual model arithmetic, with the remaining time spent on communication and other overhead. For a job spanning 16K GPUs across many physical servers, that's an excellent result.
+
+### Communication Overlap Is Everything
+
+The reason you can hit 40%+ MFU at 16K-GPU scale is that almost every communication operation is **overlapped with computation**. While GPU $A$ is computing its forward pass on layer 5, the activations from layer 4 are still being transmitted to GPU $B$. While the gradients for the FFN are reducing across the TP group, the attention's gradients are being computed.
+
+This overlap is engineering-heavy — it requires careful kernel scheduling, async communication primitives, and a runtime that knows when each operation can start. Frameworks like DeepSpeed, Megatron-LM, and PyTorch FSDP have spent years optimizing this. As an end-user, you mostly trust the framework; as a systems engineer, you spend a lot of time profiling collective ops.
+
+---
+
+## Activation Checkpointing: A Memory–Compute Trade
+
+Almost orthogonal to the parallelism axes, but essential at scale: **activation checkpointing** (also called gradient checkpointing).
+
+Backprop needs to keep activations from the forward pass to compute gradients. Activation memory scales with depth × batch × sequence × hidden dim. For a 70B model with batch 4 × seq 8192, activations can be 100+ GB per GPU.
+
+The fix: don't keep all activations. Drop most of them after the forward pass, and *recompute* them when needed for the backward pass. You pay an extra forward pass during backprop, but save most of the activation memory.
+
+The standard pattern is to checkpoint at **transformer-block boundaries**: keep the input to each block, drop everything inside. Backward redoes the block forward pass to regenerate intermediate activations, then runs the actual backward pass.
+
+The compute overhead is roughly 30% (one extra forward per backward). The memory savings are 5–10×. For frontier-scale training, it's a no-brainer — the bottleneck is memory, not compute.
+
+A more selective variant — **selective activation recomputation** (Korthikanti et al. 2022) — checkpoints only the operations that are cheap to recompute relative to their memory cost (notably the attention softmax, which is small to store but cheap to redo). This gets most of the memory savings with much less recompute overhead.
+
+---
+
+## Reliability at Scale
+
+A 16K-GPU training run is a fragile thing. Hardware fails constantly. Networks have transient errors. Cosmic rays flip bits.
+
+The Llama 3 paper documents the actual numbers. Over a **54-day snapshot**:
+
+- **466 job interruptions**, of which 47 were planned (firmware updates etc.)
+- **419 unplanned interruptions** — about one every 3 hours
+- **~78% of unplanned interruptions** traced to confirmed or suspected hardware issues
+- **GPU failures alone were 58.7%** of unexpected issues
+
+Despite this, Llama 3 achieved **>90% effective training time** — meaning at any given hour, more than 90% of the time was spent doing useful work, the rest absorbed by checkpoint/recovery cycles.
+
+How do you survive this? Three things:
+
+### Fast Checkpointing
+
+If you have to redo training from a checkpoint after every interruption, the question is: how much progress did you lose? A checkpoint every 30 minutes means you can lose up to 30 minutes of work per interruption. With one interruption every 3 hours, you'd be checkpointing 16% of your wall-clock time — too much.
+
+Llama 3's storage fabric (Tectonic) sustained 2 TB/s of write throughput, with peaks at 7 TB/s, specifically to handle the bursty checkpoint writes from 16K GPUs all dumping their state simultaneously. Each GPU writes 1 MB to 4 GB depending on the role; the total checkpoint is hundreds of GB to a few TB.
+
+Modern checkpointing also uses **async** writes — the model snapshots to CPU memory in microseconds, then the CPU writes to disk in the background while training continues. The GPU is barely paused.
+
+### Diagnostic Tools
+
+When a job hangs (a common failure mode at scale), you need to know *which* GPU is the culprit. The NCCL flight recorder logs every collective operation; PyTorch's distributed tracing captures stack traces from every rank. With these, the 16K-rank job can be debugged from a single stuck collective.
+
+### Automated Recovery
+
+Most failures at scale don't require a human. Llama 3's training was automated to detect hangs (NCCL watchdog timeouts), kill the job, restart from the last checkpoint, and continue. The paper reports that of the 419 unexpected interruptions, *only 3 required manual intervention.* The rest were absorbed by automation.
+
+This reliability infrastructure is invisible in research papers but enormous in practice. Frontier labs employ entire teams whose job is making the training infrastructure robust. The actual training algorithm is often just a few thousand lines of code; the infrastructure to run it across 16K GPUs reliably is hundreds of thousands.
+
+---
+
+## What This All Costs
+
+Putting numbers to the scale: Llama 3 405B used a **3.8 × 10²⁵ FLOPs** budget. At 16K H100s running at ~40% MFU, that's roughly **3 months of wall-clock time**. The hardware cost (rented at H100 cloud rates) would be on the order of **$50–100M** for the GPUs alone. Power, cooling, networking, and storage add to that. Plus the team running it.
+
+For comparison, GPT-4 (estimated): ~25K A100s, ~3 months. Reportedly $100M+ in compute.
+
+This is what the "frontier" in "frontier model" actually means. It's not just an algorithm or a recipe — it's an infrastructure achievement that takes a small data center, a team of systems engineers, and tens of millions of dollars to execute. The reason fewer than ten organizations in the world can train a frontier model isn't that the math is secret; the math is in papers like Llama 3's. It's that doing it requires this entire stack working in concert for months without a single uncaught bug.
+
+---
+
+## What's Next
+
+Distributed training answers the *systems* question: how do you make a training job fit and run across thousands of accelerators. The next post covers the *numerical* question: how do you make sure the math itself stays stable when you push the limits of precision, optimizers, and hyperparameters at scale. A 16K-GPU run that's distributed perfectly but explodes after 100K steps because of a loss spike is just as dead as one that runs out of memory.
+
+After that, we'll go back to fine-tuning: PEFT and LoRA, where the goal isn't to train the largest possible model but to adapt an already-trained one without paying the full cost.
+
+---
+
+## References
+
+- **[The Llama 3 Herd of Models](https://arxiv.org/abs/2407.21783)** (Meta, 2024) — Modern reference for 4D parallelism at 16K-GPU scale.
+- **[Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism](https://arxiv.org/abs/1909.08053)** (Shoeybi et al., 2019) — The original tensor parallelism paper.
+- **[ZeRO: Memory Optimizations Toward Training Trillion Parameter Models](https://arxiv.org/abs/1910.02054)** (Rajbhandari et al., 2019) — Optimizer/gradient/parameter sharding.
+- **[PyTorch FSDP: Experiences on Scaling Fully Sharded Data Parallel](https://arxiv.org/abs/2304.11277)** (Zhao et al., 2023) — PyTorch's native FSDP.
+- **[GPipe: Easy Scaling with Micro-Batch Pipeline Parallelism](https://arxiv.org/abs/1811.06965)** (Huang et al., 2018) — The original pipeline parallelism.
+- **[PipeDream: Generalized Pipeline Parallelism for DNN Training](https://arxiv.org/abs/1806.03377)** (Narayanan et al., 2019) — 1F1B scheduling.
+- **[Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM](https://arxiv.org/abs/2104.04473)** (Narayanan et al., 2021) — Interleaved schedule and 3D parallelism.
+- **[Zero Bubble Pipeline Parallelism](https://arxiv.org/abs/2401.10241)** (Qi et al., 2024) — Modern bubble-elimination schedules.
+- **[Ring Attention with Blockwise Transformers for Near-Infinite Context](https://arxiv.org/abs/2310.01889)** (Liu et al., 2023) — Sequence parallelism for long context.
+- **[DeepSeek-V3 Technical Report](https://arxiv.org/abs/2412.19437)** (DeepSeek-AI, 2024) — Expert parallelism at 671B / 256-expert scale.
+- **[Reducing Activation Recomputation in Large Transformer Models](https://arxiv.org/abs/2205.05198)** (Korthikanti et al., 2022) — Selective activation checkpointing.
+
+---
+
+*Next up: [The Numerics: Precision, Optimizers, and Stability](/blog/training-numerics) — the numerical machinery that keeps a frontier-scale training run from diverging.*
 
 ---
 
