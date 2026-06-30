@@ -1,0 +1,538 @@
+---
+title: "Understanding Transformer Training on GPUs"
+date: "2026-06-24"
+tags: ["LLM Training", "GPU", "Memory", "Data Parallelism", "FSDP", "Activation Checkpointing", "The Loss Landscape of LLM Training"]
+author: "Tanul Singh"
+description: "Before scaling to thousands of GPUs, you need to understand what happens on one. The full memory and time budget of a transformer training step — where every byte goes, where every millisecond goes, and the techniques (activation checkpointing, gradient accumulation, DDP, FSDP) that let you push a single GPU and a small cluster to their limits."
+summary: "Part 2 of the series. Before distributed training, the foundations: GPU memory hierarchy, the parameter and activation memory formulas, where time goes in a training step, and the four techniques that emerge directly from these constraints — activation checkpointing, gradient accumulation, data parallelism, and FSDP. The premise that ties them all together: every GPU runs the same model on different data."
+featured: true
+draft: true
+---
+
+*This is Part 2 of [**The Loss Landscape of LLM Training**](/blog) — a series covering everything from pre-training through fine-tuning to alignment.*
+
+*Previously: [Pre-Training: Teaching a Model to Predict](/blog/llm-pretraining)*
+
+---
+
+The [pre-training post](/blog/llm-pretraining) covered the *what* of training a language model — the objective, the data, the scaling laws. It said almost nothing about the *machine*.
+
+That machine matters. The reason your laptop can't train GPT-3 isn't that the math is wrong — it's that you don't have 80 GB of HBM3, 989 TFLOPs of BF16 compute, and 900 GB/s of NVLink bandwidth wired into your motherboard. The actual experience of training a transformer is shaped end-to-end by what GPUs are and how their memory is organized.
+
+This post is the foundation: **what happens during one training step on one GPU**, what consumes the memory, what consumes the time, and the techniques (activation checkpointing, gradient accumulation, data parallelism, FSDP) that all emerge directly from those constraints. By the end, you'll have a mental model of training that scales from one GPU to a small cluster where every GPU still holds the full model.
+
+The next post in the series ([Part 3](/blog/scaling-beyond-one-gpu)) takes the next step — splitting the model itself across GPUs. But you can't appreciate that move until you've felt the pressures it solves.
+
+---
+
+## The Two Walls
+
+To motivate everything that follows, you need to feel the size of the problem. A frontier LLM training run hits **two distinct walls** simultaneously, and almost every technique in this series is a response to one or both.
+
+### The memory wall
+
+Take a 70B-parameter model. In BF16, just the parameters are:
+
+$$70 \times 10^9 \cdot 2 \text{ bytes} = 140\,\text{GB}$$
+
+The H100 — the largest commodity GPU you can buy — has 80 GB of HBM. The parameters alone are nearly 2× larger than a single GPU's entire memory.
+
+And parameters are just the start. To *train* the model with AdamW you also need gradients, optimizer state (Adam's $m$ and $v$ moments in FP32), FP32 master weights, and activations (intermediate values stored for backprop). We'll account for each of these in detail below. The full picture for a 70B model is roughly:
+
+| Component | Size (BF16 model + FP32 optim) |
+|---|---|
+| Parameters (BF16) | 140 GB |
+| Gradients (BF16) | 140 GB |
+| Adam state (FP32 m, v) | 560 GB |
+| FP32 master weights | 280 GB |
+| Activations (varies) | 50–2000 GB |
+| **Total** | **~1.2–3 TB** |
+
+That's **15–37 H100s of memory** just to take one training step. No single GPU comes close.
+
+### The time wall
+
+Even if the model fit on one GPU, you'd hit a second wall: time.
+
+A frontier pre-training run uses roughly $10^{25}$ FLOPs of compute. One H100 sustains around 400 TFLOPs of *useful* BF16 compute (assuming ~40% MFU — model FLOPs utilization). At that rate, one H100 would take:
+
+$$\frac{10^{25}}{400 \times 10^{12}} = 2.5 \times 10^{10}\,\text{seconds} \approx \mathbf{800\ years}$$
+
+Even at 100% MFU it would be hundreds of years. Pre-training a frontier model is a thousand-GPU-year job. There's no way around parallelism even if memory weren't an issue.
+
+These two walls — memory and time — drive distributed training together. The memory wall says *you must split the model state somehow*. The time wall says *you must parallelize the computation somehow*. Different techniques target one or the other; the best ones target both.
+
+This post lives in the regime where the memory wall is mostly tractable on a small cluster (model state fits with sharding tricks) and the main job is to use compute efficiently. The next post deals with the regime where neither wall can be sidestepped.
+
+---
+
+## GPU 101 — What You Need to Know
+
+Before going further, a short grounding in what a GPU actually is, since most of the tricks below only make sense in the context of GPU architecture.
+
+### Memory hierarchy
+
+A modern training-class GPU (H100) has three relevant memory tiers:
+
+| Tier | Size | Bandwidth | Latency |
+|---|---|---|---|
+| **Registers** (per-thread) | KBs | — | nanoseconds |
+| **SRAM** (shared memory, on-chip) | ~256 KB per SM, ~50 MB total | ~20 TB/s | ~10 ns |
+| **HBM** (high-bandwidth memory, off-chip) | 80 GB | 3.35 TB/s | ~500 ns |
+
+HBM is what people mean when they say "GPU memory." It's where your model weights, activations, and optimizer state live. It's huge (80 GB) but relatively slow.
+
+SRAM is *50× faster* but tiny — barely enough for a single attention layer's working set. This asymmetry is the entire reason FlashAttention exists: by computing attention in tiles small enough to fit in SRAM, it avoids round-trips through slow HBM.
+
+### Compute units
+
+H100 has 132 Streaming Multiprocessors (SMs). Each SM contains hundreds of CUDA cores plus *tensor cores* (specialized matrix-multiply units). When you read "989 TFLOPs of BF16," that's the tensor cores running matmuls at peak. Anything that isn't a matmul (activations, normalizations, attention softmax) runs on the CUDA cores at ~16× lower throughput.
+
+This is why transformer training is dominated by the matmul operations — they're where the GPU shines. The non-matmul ops (LayerNorm, softmax, GeLU) are tiny in parameter count but consume real time because they're memory-bound rather than compute-bound.
+
+### Kernels and launches
+
+Every GPU operation is a **kernel** — a small program launched from CPU to GPU. Each kernel launch has overhead (~10 µs). If you naively run a transformer layer as `x = norm(x); x = linear(x); x = gelu(x); ...`, you might be doing 10+ launches per layer. At 80 layers, that's 800+ launches per forward pass — and the launch overhead alone can rival the actual compute.
+
+This is why **kernel fusion** matters. Tools like `torch.compile` and FlashAttention combine many small ops into one fused kernel, cutting launches by 10×.
+
+### Communication
+
+When training on multiple GPUs, they talk via:
+
+- **NVLink** — within a single server (~900 GB/s on H100 NVSwitch). Used for tight communication within a small group of GPUs.
+- **InfiniBand / RoCE** — between servers (~400 Gb/s = 50 GB/s per port). Used for less frequent, less latency-sensitive comm.
+
+These are 10–20× slower than HBM. That gap is why "communication-aware" parallelism design exists — you want chatty operations on NVLink, sparser ones on the network.
+
+The standard collective operations you'll see:
+
+- **All-reduce**: every GPU has a tensor; at the end every GPU has the sum (or mean). Used for gradient averaging in DP.
+- **All-gather**: every GPU has a slice; at the end every GPU has all slices concatenated. Used for parameter gathering in FSDP.
+- **Reduce-scatter**: like all-reduce but each GPU ends with only its own shard of the result. Used for gradient sharding in FSDP.
+
+NCCL is NVIDIA's library that implements these efficiently for GPUs. When you read training code and see `dist.all_reduce(...)`, that's a NCCL call.
+
+---
+
+## Where the Memory Goes: The Parameter Formula
+
+Let's start with the model state itself — parameters, gradients, optimizer state. For this we need to count parameters.
+
+For a vanilla GPT-style transformer with $L$ layers, hidden dim $h$, and vocab size $v$:
+
+$$N \approx h \cdot v + L \cdot (12h^2 + 13h) + 2h$$
+
+Where the terms come from:
+
+- **$h \cdot v$** — token embedding matrix `[v, h]` (assuming weight-tied output head)
+- **$L \cdot 12h^2$** — per-layer parameters: $4h^2$ for QKV+output attention projections, $8h^2$ for the FFN's two `[h, 4h]` and `[4h, h]` matrices
+- **$L \cdot 13h$** — biases (4 in attention, 5 in FFN) + two LayerNorms (2 params each × 2 norms = 4h)
+- **$2h$** — final LayerNorm before the LM head
+
+Modern variants tweak the constants — no biases drops the $13h$, GQA shrinks the attention term, SwiGLU has three FFN matrices — but $12Lh^2$ dominates for any large model.
+
+### From parameters to memory
+
+Once you know parameter count, the model state budget follows mechanically. For AdamW training in BF16 with FP32 master weights:
+
+| Component | Bytes per parameter |
+|---|---|
+| Parameters (BF16) | 2 |
+| Gradients (BF16) | 2 |
+| FP32 master weights | 4 |
+| Adam $m$ (FP32) | 4 |
+| Adam $v$ (FP32) | 4 |
+| **Total** | **16 bytes/param** |
+
+For a 70B model: $70 \times 10^9 \times 16 = 1.12\,\text{TB}$.
+
+The optimizer state alone (12 bytes/param) is **6× larger than the model itself**. This is the dominant cost of training-versus-inference: serving a model takes 2 bytes/param; training takes 16. That 8× gap is why you can serve a 70B model on a single GPU but cannot train one there.
+
+---
+
+## Where the Memory Goes: The Activation Formula
+
+The other half of memory is **activations** — intermediate tensors that the forward pass stores so the backward pass can compute gradients. This is the more interesting (and at long context, more painful) half.
+
+From the [Megatron-LM activation paper](https://arxiv.org/abs/2205.05198), per-layer activation memory for a vanilla transformer in BF16 is:
+
+$$m_{\text{act per layer}} = s \cdot b \cdot h \cdot \left(34 + \frac{5 \cdot a \cdot s}{h}\right)$$
+
+where $s$ = sequence length, $b$ = batch size, $h$ = hidden dim, $a$ = number of attention heads. Multiply by $L$ layers for the total.
+
+The constant `34` and the term `5as²b` come from carefully enumerating which intermediate tensors get stored. The breakdown:
+
+| Component | Memory per layer (bytes) |
+|---|---|
+| Two LayerNorms (inputs stored) | $4sbh$ |
+| Attention block, linear-in-$s$ (QKV input, Q, K, V, attn output, dropout mask) | $11sbh$ |
+| Attention matrix (scores, softmax output, dropout mask) | $5as^2b$ |
+| FFN block (input, 4× intermediate twice, dropout mask) | $19sbh$ |
+| **Total per layer** | $\mathbf{34sbh + 5as^2b}$ |
+
+(For a full derivation see [the standalone walkthrough](/notes) — same content, just slower.)
+
+### The crossover that matters
+
+The two terms scale differently in sequence length. The `34sbh` term is **linear in $s$**. The `5as²b` term is **quadratic in $s$**. They cross over at:
+
+$$s_{\text{crossover}} = \frac{34h}{5a} = \frac{34 d_{\text{head}}}{5}$$
+
+For typical $d_{\text{head}} = 128$: crossover at **~870 tokens**.
+
+- **Below 870 tokens**: activation memory is dominated by hidden-dim-shaped tensors (FFN, QKV).
+- **Above 870 tokens**: activation memory is dominated by the attention matrix.
+
+This is the single most important fact about long-context training. Once you cross the threshold, doubling sequence length **quadruples** activation memory — but only for one specific tensor (the attention scores).
+
+### How bad does it get?
+
+For a 70B-style model (h=8192, L=80, a=64), batch=1, BF16:
+
+| Sequence length | Total activation memory |
+|---|---|
+| 2K tokens | ~50 GB |
+| 8K tokens | ~470 GB |
+| 32K tokens | ~7 TB |
+| 128K tokens | ~110 TB |
+
+At 8K context, activations alone are already **5× the size of an H100**. At 128K, they're a thousand times larger.
+
+This is the real bottleneck of long-context training. The two largest line items in the entire training memory budget are:
+
+1. Optimizer state (~$12N$ bytes, fixed)
+2. Activations (~$34Lsbh + 5Las^2b$ bytes, grows with seq and batch)
+
+Most of the tricks in the rest of this post are about controlling one or both of these.
+
+---
+
+## Where the Time Goes
+
+Memory was the *what*. Time is the *how much*.
+
+For one training step, the work breaks into three phases:
+
+| Phase | Approximate share | What dominates |
+|---|---|---|
+| **Forward pass** | ~30% | Matmuls (QKV, output, FFN) |
+| **Backward pass** | ~60% | Matmuls (2× forward — input grads + weight grads) |
+| **Optimizer step** | ~10% | Element-wise ops on optimizer state |
+
+Backward is roughly 2× forward because each parameter needs both a gradient with respect to its input and a gradient with respect to its weights. The optimizer step is much smaller — it's just element-wise math on the gradient and Adam state.
+
+Within each phase, the FLOP count is dominated by the FFN and attention matmuls. For one forward pass:
+
+$$\text{FLOPs} \approx 2 \cdot N \cdot s \cdot b$$
+
+where $N$ is parameter count, $s$ is sequence length, $b$ is batch size. The factor of 2 is "one multiply + one add" per parameter per token. Add another factor of 2 for backward (so 6N per token per step, the famous "$6N$" coefficient from the Chinchilla paper).
+
+### MFU — the only number that matters
+
+In practice, no training run hits the GPU's peak FLOPs. Real runs hit some fraction — the **Model FLOPs Utilization**:
+
+$$\text{MFU} = \frac{\text{useful FLOPs per second}}{\text{peak FLOPs per second}}$$
+
+For frontier-scale training, MFU is typically **30–50%**. The remaining 50–70% is spent on:
+
+- Memory-bound ops (LayerNorm, softmax, attention masking) that can't use tensor cores
+- Communication between GPUs
+- Kernel launch overhead
+- Bubbles in pipeline parallelism, idle time during all-reduces, etc.
+
+Llama 3's reported MFU was 38–43% across its 16K H100 training run — and that's after enormous engineering effort. The "ideal" frontier-training cost (in dollars or wall-clock) is roughly **2–3× the theoretical lower bound** because of all this overhead.
+
+Most of the techniques in this post and the next are about pushing MFU up by reducing one of those overhead sources.
+
+---
+
+## Pressure 1: Activations Are Too Big → Activation Checkpointing
+
+We've established that activations dominate memory at long context. The simplest response: **don't store them all**.
+
+The forward pass is deterministic. Given the input to a layer, you can always recompute its activations. So instead of storing every intermediate tensor for backprop, you store only a *subset* — and recompute the missing ones during backward.
+
+This is **activation checkpointing** (also called gradient checkpointing; [Chen et al., 2016](https://arxiv.org/abs/1604.06174)).
+
+### Full block checkpointing
+
+The standard pattern: keep only the **input to each transformer block**, drop everything inside. On backward, when you need a layer's activations, redo its forward pass from the stored block input to regenerate them, then run the backward through them, then drop again.
+
+The memory math becomes:
+
+$$m_{\text{act with checkpointing}} \approx L \cdot 2sbh$$
+
+For the 70B model at 8K context:
+- Without: ~470 GB
+- With full checkpointing: ~10 GB
+
+That's a **45× reduction in activation memory**. The cost: one extra forward pass per backward pass, which is roughly a **30% throughput hit** (since forward is ~30% of total work).
+
+At frontier scale this is a no-brainer trade. The bottleneck is memory, not compute.
+
+### Selective recomputation
+
+The Megatron paper has a clever refinement. Look back at the per-layer breakdown:
+
+- `34sbh` term — linear-in-$s$ tensors (FFN intermediates, QKV) — *cheap to store, expensive to recompute*
+- `5as²b` term — attention matrix — *expensive to store, cheap to recompute* (softmax + a matmul)
+
+The quadratic term is the biggest memory consumer at long context and *also* the cheapest to recompute. So why not target only that?
+
+**Selective activation recomputation**: store the `34sbh` activations normally, but drop and recompute only the `5as²b` attention-matrix piece. You get nearly all the memory savings of full checkpointing for ~**2% recompute overhead** instead of 30%.
+
+This is the modern default in Megatron-LM, DeepSpeed, and NeMo. When you read about "activation checkpointing" in 2026, it's almost always the selective variant.
+
+> **The same pressure, three responses:** the `5as²b` attention activation term is so big and so cheap that *three different techniques* attack it: selective checkpointing (drop and recompute), FlashAttention (never materialize in HBM), and Ring Attention (shard across GPUs — covered in Part 3). All three exist because the attention matrix is the single most painful tensor in a transformer.
+
+---
+
+## Pressure 2: I Want a Bigger Batch Than Fits → Gradient Accumulation
+
+You've optimized memory as much as you can. Your activations are checkpointed. Your model state is what it is. And you've got room for a batch size of 4 sequences per GPU — but the recipe you want to follow calls for a *global* batch of 64.
+
+Two options:
+1. Use the smaller batch. Get noisier gradients and worse convergence.
+2. **Fake it.** Run 16 forward+backward passes in sequence, accumulating gradients into the same buffer, and only take the optimizer step at the end.
+
+That's **gradient accumulation**. The math is:
+
+$$g_{\text{total}} = \sum_{i=1}^{K} g_i$$
+
+Then $\theta \leftarrow \theta - \eta g_{\text{total}}$. Mathematically identical to a single batch of size $K \times b$, but only requires memory for $b$ at a time. The trade: $K \times$ the wall-clock per optimizer step.
+
+### Why this is a real technique, not a hack
+
+The reason gradient accumulation is fundamental — not just a memory workaround — is that **batch size composition is decoupled from physical memory size**. You can dial in the "effective" batch size that the optimizer sees independently of what fits on the GPU.
+
+This shows up everywhere in real recipes:
+
+- Llama 3 used a global batch of 16M tokens. Per-GPU batches were tiny. The "16M" came from heavy gradient accumulation over many GPUs across many micro-steps.
+- For research workflows where you want to A/B test the same recipe at different sizes, gradient accumulation lets you keep batch size constant while changing model size.
+- When fine-tuning a 70B on consumer GPUs, you might have batch=1 physically but accumulate to batch=64 logically.
+
+Gradient accumulation also has an important interaction with data parallelism — we'll come back to it once we get there.
+
+---
+
+## The Single-GPU Picture, Assembled
+
+You now have the full mental model for one GPU. Per step:
+
+1. **Forward pass**: stream the input through L layers. Store activations (or only the checkpointed subset) for backprop.
+2. **Backward pass**: walk backward through L layers. At each layer: (a) recompute activations if they were checkpointed, (b) compute gradient w.r.t. input, (c) compute gradient w.r.t. weights, (d) accumulate into the gradient buffer.
+3. **Optimizer step**: read parameters, gradients, and Adam state from HBM; apply update; write back. (Skip if accumulating.)
+
+Memory composition at any moment:
+- Parameters + gradients + optimizer state (constant)
+- Activations (varies with how much of the forward pass has run, modulated by checkpointing)
+- Transient working memory for in-flight kernels
+
+Time composition per step:
+- ~30% forward, ~60% backward, ~10% optimizer
+- Within forward and backward: dominated by matmuls (which use tensor cores)
+- The remaining 10–20% goes to non-matmul ops (LayerNorm, softmax, etc.) that are memory-bound
+
+Now we extend to multiple GPUs.
+
+---
+
+## Pressure 3: One GPU Is Too Slow → Data Parallelism
+
+The time wall says one GPU would take centuries. Distribute the work.
+
+The simplest scheme: every GPU holds a complete copy of the model, every step you split your batch across GPUs, every GPU computes gradients on its own slice of data, then you **average gradients across GPUs** so they all apply the same update and stay in sync.
+
+This is **data parallelism**. The averaging step is an **all-reduce** — a NCCL collective that takes one tensor from every GPU and gives every GPU the sum (or mean).
+
+### The naive version is wasteful
+
+The most direct implementation: run the full forward pass, run the full backward pass, then all-reduce all gradients, then optimizer step, then start the next batch.
+
+```
+GPU compute:  [-- forward --][-- backward --]        [step]
+Network:                                      [all-reduce]
+                                              ↑
+                                       GPU sits idle here
+```
+
+Wasteful because *during the all-reduce, the GPU's compute units are doing nothing*. The network is busy; the SMs are not.
+
+But couldn't the GPU just start on the next batch during the all-reduce? **No** — and the reason is mathematical. The next batch needs the updated weights, and the weights haven't been updated yet (the optimizer step happens after the all-reduce). If you started forward on stale weights, you'd be doing asynchronous SGD, which is a different optimization algorithm with worse convergence dynamics. Synchronous SGD — what everyone uses — *requires* every GPU to start every step from the same updated weights.
+
+So the rigid dependency chain is:
+```
+backward → all-reduce → optimizer step → next forward
+```
+
+You can't break it. But you *can* notice something subtler.
+
+### The real opportunity
+
+The all-reduce of **layer N's gradient** doesn't depend on the backward pass of **layers N-1, N-2, ...**
+
+Why? Backward flows output-to-input. To compute layer N-1's gradients, you need:
+- Layer N-1's activations (stored from forward — already in memory)
+- The gradient flowing back from layer N — which is just $\partial L / \partial \text{input}(N)$, computed locally on this GPU
+
+You do **not** need the *averaged* gradient of layer N's parameters. Each GPU's local layer N gradient flows backward into layer N-1's computation independently. The averaging across GPUs only matters at the optimizer step.
+
+So as soon as layer N's gradient is computed (still mid-backward), fire its all-reduce — and the GPU keeps grinding through the backward passes for layers N-1, N-2, ... in parallel.
+
+```
+GPU compute:  [B_L][B_{L-1}][B_{L-2}]...[B_1]   [step]
+Network:           [AR_L][AR_{L-1}][AR_{L-2}]...[AR_1]
+                   ↑
+            starts the moment B_L finishes,
+            runs in parallel with later backward
+```
+
+The only un-overlappable piece is the **last layer's all-reduce** — by the time the input layer's gradient is ready, backward is over and there's no compute left to hide it behind. That tail is the irreducible cost.
+
+In PyTorch this is implemented with hooks on each parameter (`p.register_post_accumulate_grad_hook(...)`) that fire async all-reduces the moment a parameter's gradient is computed.
+
+### Bucketing — fewer, bigger reduces
+
+A real model has thousands of parameter tensors. If you fire an all-reduce per parameter, you launch thousands of tiny NCCL calls — and every NCCL call has fixed overhead (~30 µs). That overhead dominates if your tensors are small.
+
+The fix: **bucket** parameters together. Wait until a few tensors' worth of gradients are ready, then fire one all-reduce for the whole bucket.
+
+PyTorch DDP's default bucket size is 25 MB. The number of all-reduces drops by 100×; the total bytes transferred is unchanged. Pure win.
+
+Bucketing is the same idea as overlapping (Optimization 1), but the unit is now a *group* of parameters instead of one. You're still pipelining compute and communication — just at coarser granularity.
+
+### Interaction with gradient accumulation
+
+Now an interesting compounding. If you're doing gradient accumulation across $K$ micro-steps, naive DP would all-reduce after every micro-step. But the intermediate gradients aren't used — only the final accumulated gradient matters for the optimizer step.
+
+Solution: **skip the all-reduce on all but the last micro-step**. PyTorch exposes this as `model.no_sync()`:
+
+```python
+for i, microbatch in enumerate(microbatches):
+    is_last = (i == len(microbatches) - 1)
+    context = nullcontext() if is_last else model.no_sync()
+    with context:
+        loss = model(microbatch)
+        loss.backward()
+optimizer.step()
+```
+
+For 8 accumulation steps, this cuts the communication cost by 8×. The math is unchanged because addition is commutative — accumulating then averaging gives the same answer as averaging then accumulating.
+
+### What you should take away
+
+Naive DP → overlapped → bucketed → no_sync stacks to roughly:
+
+| Setup | MFU loss to communication |
+|---|---|
+| Naive DP | 30–40% |
+| + Overlap with backward | ~10% |
+| + Bucketing | ~7% |
+| + no_sync during accumulation | ~3% |
+
+The unifying lesson: **compute and communication run on different hardware**. The naive version uses them sequentially; the optimized version pipelines them. This pattern recurs in every form of distributed training — FSDP prefetches parameters during current-layer compute; tensor parallelism overlaps all-reduces with subsequent layers; pipeline parallelism has whole microbatches flying through the pipeline simultaneously. Once you see overlap-is-everything, distributed training stops looking like a zoo of unrelated tricks.
+
+---
+
+## Pressure 4: The Model Doesn't Fit, Even With Checkpointing → FSDP / ZeRO
+
+Data parallelism solves the *time* wall but does nothing for the *memory* wall. Every GPU still holds a complete copy of the model, gradients, and optimizer state. The 70B model that needs 1.12 TB of state still needs 1.12 TB *on every GPU*.
+
+That's an obvious inefficiency. With 8 GPUs in DP, you're storing **8 redundant copies** of the same parameters, the same gradients, the same optimizer state. 8× redundancy across 8 GPUs = total memory used = $8 \times 1.12\text{TB} = 9$ TB, but the *unique* memory is only 1.12 TB.
+
+What if each GPU stored only *its share* of the parameters, gradients, and optimizer state — and the others got reconstructed on demand?
+
+That's **ZeRO** ([Rajbhandari et al., 2019](https://arxiv.org/abs/1910.02054)) and its PyTorch reimplementation **FSDP** (Fully Sharded Data Parallel). It's still data parallelism — every GPU still processes a different microbatch — but the storage is sharded.
+
+### The three stages
+
+| Stage | What's sharded | Memory per GPU (vs DDP) | Communication added |
+|---|---|---|---|
+| ZeRO-1 / FSDP-O | Optimizer state | ~1/4 | None |
+| ZeRO-2 / FSDP-OG | + Gradients | ~1/8 | None |
+| ZeRO-3 / FSDP-OGW | + Parameters | ~1/$N$ | All-gather per layer |
+
+ZeRO-1 and ZeRO-2 are "free" — they shard the static-during-forward state. You don't need parameters during the optimizer step on a different GPU (you each apply the update to your own shard, then sync), and you don't need gradients except locally (you reduce-scatter them as part of the existing backward all-reduce). So these stages get you 4× and 8× memory savings with no extra communication.
+
+ZeRO-3 is the one that requires real work. Now parameters themselves are sharded — every GPU stores only $1/N$ of the weights. But to run the forward pass on a layer, every GPU needs that layer's *full* weights. So before each layer's forward, you do an **all-gather** to assemble the full parameters from across GPUs. After the forward (and again before backward), drop them. Per-layer all-gather + per-layer drop.
+
+### What makes FSDP work in practice
+
+The all-gather sounds expensive — and it would be, if done synchronously. The reason FSDP is tractable is the same trick as DDP's backward overlap: **prefetching**.
+
+While GPU A is computing the forward pass on layer 5, the parameters for layer 6 are being all-gathered in the background. By the time layer 5 finishes, layer 6's weights are ready. With careful kernel scheduling, the gather cost is largely hidden behind compute — exactly the overlap-is-everything pattern from DDP, applied to a different op.
+
+The same trick on backward: while computing backward on layer 5, the parameters for layer 4 are being gathered in advance.
+
+### What FSDP gets you
+
+With FSDP and 8 GPUs, the 70B model needs:
+
+| Component | Per-GPU memory (FSDP-3) |
+|---|---|
+| Parameters | 17.5 GB (140/8) |
+| Gradients | 17.5 GB (140/8) |
+| Optimizer state | 105 GB (840/8) |
+| Activations (with checkpointing) | ~10 GB |
+| Transient (gathered layer weights) | ~2 GB |
+| **Total per GPU** | **~150 GB** |
+
+Still doesn't fit on an H100 (80 GB), but with 16 GPUs it does. And every GPU is doing useful work on its own microbatch the whole time — this is still pure data parallelism, just smarter about storage.
+
+For models up to a few hundred billion parameters, FSDP is the right answer. It's the simplest sharding scheme that gives you near-linear memory scaling with GPU count.
+
+### The premise that holds across Part 1
+
+Notice the through-line: **every technique in this post — checkpointing, accumulation, DDP, FSDP — keeps the same model on every GPU**. The differences across GPUs are about *what data* they see and *what's stored where*. The computation each GPU runs is the same.
+
+That's the conceptual boundary for Part 1. Once you start putting *different parts of the model* on different GPUs — splitting individual matmuls across GPUs, putting layer 1 on GPU 1 and layer 2 on GPU 2 — you've moved into a different regime entirely. That's Part 3.
+
+---
+
+## When FSDP Isn't Enough
+
+Eventually FSDP runs out of road. Two failure modes:
+
+1. **A single layer is too big to gather**. The all-gather for layer N temporarily materializes the full layer weights on every GPU. If one layer's weights exceed your GPU's free memory budget, the gather itself OOMs. This happens for very wide models (e.g., a 1T model with $h = 18432$ — one FFN's weight matrix is 5 GB in BF16, plus you need it on every GPU briefly).
+
+2. **The network can't keep up**. FSDP needs an all-gather per layer per forward, per layer per backward. As the cluster scales out beyond one server, this comm cost grows. At some point you can't hide it behind compute anymore, and MFU collapses.
+
+Both failure modes have the same root cause: **FSDP doesn't reduce the compute or memory required for any single layer's forward pass; it just spreads storage**. The forward pass for layer N still requires layer N's full weights to exist on some GPU, and that GPU still has to do the full matmul on the full activations.
+
+The next post is about what to do when even one layer is too much for one GPU.
+
+---
+
+## What's Next
+
+Part 3 introduces the techniques where different GPUs hold and compute *different parts of the model*:
+
+- **Tensor parallelism** — split each layer's matmul across GPUs
+- **Pipeline parallelism** — split the layer stack across GPUs
+- **Sequence / context parallelism** — split the sequence dimension across GPUs
+- **Expert parallelism** — for MoE models, split the experts across GPUs
+
+Combined, these form the **4D parallelism** recipe that frontier labs use to train at 10,000+ GPU scale. We'll work through Llama 3's exact configuration: TP=8, PP=16, CP=16 (long-context phase), DP=128, totaling 16,384 H100s.
+
+The pattern from Part 1 — **find work that doesn't depend on what's communicating, do them in parallel** — recurs in every one of these techniques. Once you see the pattern, the rest is bookkeeping.
+
+---
+
+## References
+
+- **[Reducing Activation Recomputation in Large Transformer Models](https://arxiv.org/abs/2205.05198)** (Korthikanti et al., 2022) — Activation memory formula, selective recomputation.
+- **[Training Deep Nets with Sublinear Memory Cost](https://arxiv.org/abs/1604.06174)** (Chen et al., 2016) — Original activation checkpointing.
+- **[ZeRO: Memory Optimizations Toward Training Trillion Parameter Models](https://arxiv.org/abs/1910.02054)** (Rajbhandari et al., 2019) — Sharding optimizer state, gradients, parameters.
+- **[PyTorch FSDP: Experiences on Scaling Fully Sharded Data Parallel](https://arxiv.org/abs/2304.11277)** (Zhao et al., 2023).
+- **[The Llama 3 Herd of Models](https://arxiv.org/abs/2407.21783)** (Meta, 2024) — Reference for MFU numbers and frontier-scale infrastructure.
+- **[Transformer Math 101](https://blog.eleuther.ai/transformer-math/)** (Eleuther, 2023) — Canonical memory-accounting reference.
+- **[The Ultra-Scale Playbook](https://huggingface.co/spaces/nanotron/ultrascale-playbook)** (HuggingFace, 2024) — The most thorough interactive walkthrough of distributed training currently in existence; complement to this post.
+
+---
+
+*Next up: [Scaling Transformer Training Beyond One GPU](/blog/scaling-beyond-one-gpu) — tensor, pipeline, sequence, and expert parallelism, and how Llama 3 combined them across 16,000 GPUs.*
+
+---
+
+*Found this useful? The full series: [The Loss Landscape of LLM Training](/blog)*

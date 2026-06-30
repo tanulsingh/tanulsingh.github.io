@@ -1,6 +1,6 @@
 ---
 title: "The Numerics: Precision, Optimizers, and Stability"
-date: "2026-05-30"
+date: "2026-06-23"
 tags: ["LLM Training", "Mixed Precision", "Adam", "Training Stability", "The Loss Landscape of LLM Training"]
 author: "Tanul Singh"
 description: "The numerical machinery of LLM training — mixed precision formats, optimizer algorithms, learning rate schedules, and the stability techniques that prevent a billion-dollar training run from diverging."
@@ -15,22 +15,340 @@ draft: true
 
 ---
 
-## Coming Soon
+A 16,000-GPU training job that's distributed perfectly but diverges at step 100,000 because of a loss spike is just as dead as one that ran out of memory on day one. The systems work in [Part 2](/blog/distributed-training) makes the training *possible*. The numerical work in this post makes it *survive*.
 
-Topics to cover:
-- Mixed precision: FP32 → FP16 → BF16 → FP8 (loss scaling, master weights)
-- Optimizers: Adam, AdamW, 8-bit Adam, Adafactor, LION, Muon, schedule-free
-- LR schedules: warmup, cosine, WSD, inverse sqrt
-- Batch size warmup, linear scaling rule
-- Gradient clipping, weight decay
-- Training instabilities: loss spikes, attention logit growth, embedding divergence
-- QK LayerNorm, z-loss, residual scaling
-- µP (maximal update parameterization) for hyperparameter transfer
-- torch.compile, operator fusion, CUDA graphs
+Modern LLM training is a numerical tightrope. The model is a 70-billion-parameter chain of matmuls. Each matmul is computed in 16-bit floating-point arithmetic — three orders of magnitude less precise than the FP32 we used for ML a decade ago. Gradients flow through hundreds of layers, getting multiplied at every step, and any numerical instability anywhere will compound into infinity.
+
+This post is about the recipes — empirical, hard-won, sometimes ad-hoc — that keep things stable. Mixed-precision training. Optimizers. Learning-rate schedules. Gradient clipping. Loss-spike recovery. Hyperparameter transfer via µP. The stuff that's invisible when training works and ruinous when it doesn't.
 
 ---
 
-*Next up: [Fine-Tuning I: LoRA, Adapters, and All Things PEFT](/blog/peft-lora)*
+## Why Numerics Matter
+
+The cleanest way to see the problem: imagine training a 100B model in pure FP32. Every parameter is 4 bytes, every gradient is 4 bytes, every Adam moment is 4 bytes. Optimizer state alone is 800 GB. The matmuls are computed at FP32 throughput, which on H100 is 8× *slower* than FP16/BF16 throughput.
+
+So we want lower precision for compute and storage. But lower precision means:
+- **Smaller dynamic range** — small gradients underflow to zero, large activations overflow to infinity
+- **Lower precision in updates** — small parameter updates get rounded to zero (the "swamping" problem)
+- **Compounding error** through hundreds of layers and millions of steps
+
+Mixed precision is the compromise. The next sections walk through the formats themselves, then the algorithmic recipes that make them work.
+
+---
+
+## Mixed-Precision Training
+
+A floating-point number has three parts: sign, exponent, mantissa. The exponent determines the *range* (how big or small the number can be); the mantissa determines the *precision* (how many distinct values you can represent at any given scale).
+
+| Format | Total bits | Exponent | Mantissa | Range | Precision |
+|---|---|---|---|---|---|
+| FP32 | 32 | 8 | 23 | ±10³⁸ | ~7 decimal digits |
+| FP16 | 16 | 5 | 10 | ±65,504 | ~3 decimal digits |
+| BF16 | 16 | 8 | 7 | ±10³⁸ | ~2 decimal digits |
+| FP8 (E4M3) | 8 | 4 | 3 | ±448 | ~1 decimal digit |
+| FP8 (E5M2) | 8 | 5 | 2 | ±57,344 | &lt;1 decimal digit |
+
+### FP16: The First Try, and Why It's Hard
+
+FP16 has the same precision as BF16 in some sense (both have 16 bits) but the bits are allocated differently. FP16 has more mantissa bits — better precision — but a smaller exponent — narrower range. Anything below ~6×10⁻⁵ underflows to zero.
+
+That underflow is a real problem in deep learning. Activations and weights are usually in a comfortable range, but gradients during backprop can be tiny. If gradients underflow to zero, learning stops.
+
+The classical fix is **loss scaling**: multiply the loss by a large constant (say 2¹⁵) before backprop, so gradients are scaled up enough to not underflow, then divide by the same constant before applying the update. NVIDIA's Apex library popularized **dynamic loss scaling** — automatically tuning the scale up when no overflows occur, halving it when they do.
+
+It works, but it's fragile. Loss scaling is one more thing to tune, one more thing that can go wrong. Which is why the field moved to BF16.
+
+### BF16: Same Range as FP32, Half the Bits
+
+BF16 was designed by Google for TPUs and has since taken over GPU training too. The key insight: keep the same 8-bit exponent as FP32, sacrifice mantissa precision instead. You lose precision but keep range.
+
+Why this works for deep learning: gradient *magnitudes* span a huge range (some gradients are 10⁻⁴, others 10²), but at any given scale, you don't need many digits of precision. The model is robust to small rounding errors but not to wholesale underflow.
+
+With BF16, **no loss scaling is needed**. Underflow is rare because the range matches FP32. The model just trains. This is why BF16 is now the universal default for pre-training.
+
+### Master Weights in FP32
+
+There's a subtle problem that survives the move to BF16: **swamping in optimizer updates**.
+
+Imagine a parameter $w = 1.0$ and an update $\Delta w = 10^{-4}$. In BF16, with only 7 mantissa bits, $1.0 + 10^{-4}$ rounds to $1.0$. The update gets lost.
+
+The fix is to keep a **master copy of the weights in FP32**. The forward and backward passes use BF16 weights for speed; the optimizer step happens in FP32 against the master weights; after the step, the master is cast back to BF16 for the next forward pass.
+
+This sounds wasteful — we're keeping both BF16 weights *and* FP32 master weights — but the FP32 copy lives in optimizer state, which we already have anyway. Adam's $m$ and $v$ are stored in FP32 too, so master weights add only 2 bytes per parameter on top of the 8 bytes Adam already uses.
+
+The result is the standard recipe: **BF16 for compute, FP32 for accumulation and parameter updates**. Every modern training framework (PyTorch's autocast, JAX's float32 policy, DeepSpeed) implements this.
+
+### FP8: The New Frontier
+
+FP8 doubles compute throughput again on H100 and B100. There are two FP8 variants:
+- **E4M3** (4 exponent bits, 3 mantissa) — better precision, narrower range. Used for forward activations and weights.
+- **E5M2** (5 exponent bits, 2 mantissa) — wider range, less precision. Used for backward gradients.
+
+The asymmetry matters. Activations and weights have predictable distributions; using E4M3 gets the precision where it helps. Gradients are spikier; E5M2's wider range avoids overflow.
+
+FP8 training requires more careful per-tensor scaling (each tensor gets its own scale factor that's recomputed periodically) and **micro-scaling** (per-block scales within a tensor, e.g. MXFP8). DeepSeek-V3 famously used FP8 for most of its compute, with FP32 master weights and selective BF16 for sensitive operations like normalization.
+
+(For a much deeper dive on FP8 and its lower-bit cousins, see the [Quantization and Model Merging](/blog/sft-quantization) post — Part 5 of this series.)
+
+---
+
+## Optimizers
+
+The optimizer is the algorithm that turns gradients into parameter updates. The choice of optimizer governs how fast you converge, how stable training is, and how much memory you need.
+
+### Adam and AdamW
+
+Adam ([Kingma & Ba 2014](https://arxiv.org/abs/1412.6980)) keeps two running statistics per parameter:
+- $m_t$ — the running mean of gradients (first moment)
+- $v_t$ — the running mean of squared gradients (second moment)
+
+The update is
+
+$$\theta_{t+1} = \theta_t - \eta \cdot \frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon}$$
+
+with $\hat{m}, \hat{v}$ being bias-corrected versions. The intuition: the first moment is momentum — it smooths out noisy gradients. The second moment is per-parameter learning-rate adaptation — parameters with consistently large gradients get smaller effective LRs, parameters with small gradients get larger LRs.
+
+This adaptive per-parameter learning rate is *the* reason Adam works for transformers. Different parameters in a transformer have wildly different gradient magnitudes (compare the gradient of the bias term in layer 1 to the gradient of the residual stream in layer 80). A single global LR can't serve them all.
+
+**AdamW** ([Loshchilov & Hutter 2017](https://arxiv.org/abs/1711.05101)) makes one change: weight decay is applied directly to the parameters, not folded into the gradient. The standard "L2 regularization" trick of adding $\lambda \theta$ to the gradient interacts badly with Adam's per-parameter scaling — parameters with small $\hat{v}$ get effectively larger weight decay, which is the opposite of what you want.
+
+AdamW separates them: the gradient term goes through Adam's adaptive scaling, but weight decay is applied independently as $\theta_{t+1} = \theta_t - \eta \lambda \theta_t$. This is the standard for LLMs. Don't ship a model trained with vanilla Adam + L2; ship AdamW.
+
+### The Memory Cost
+
+Adam keeps two FP32 moments per parameter. With FP32 master weights, that's 12 bytes per parameter just for the optimizer (plus the BF16 model itself). For a 70B model:
+
+- BF16 weights: 140 GB
+- BF16 gradients: 140 GB
+- FP32 master weights + Adam moments: 12 × 70B = 840 GB
+
+The optimizer state is 6× larger than the model. Most of the "memory wall" we discussed in [Part 2](/blog/distributed-training) is actually the optimizer.
+
+### 8-bit Adam
+
+[bitsandbytes' 8-bit Adam](https://arxiv.org/abs/2110.02861) (Dettmers et al., 2021) quantizes the optimizer state to 8 bits using block-wise dynamic quantization. The math is delicate — Adam's moments need a wide dynamic range — but the empirical result is that you can quantize $m$ and $v$ to 8 bits with no measurable degradation, and save 75% of optimizer memory.
+
+This is huge for fine-tuning workflows where you want to fit a larger model on a single GPU. Almost every QLoRA setup uses paged 8-bit AdamW under the hood.
+
+### Adafactor
+
+[Adafactor](https://arxiv.org/abs/1804.04235) (Shazeer & Stern, 2018) goes further: it factorizes the second-moment estimate. Instead of storing one $v_{ij}$ per parameter, it stores per-row and per-column means and reconstructs $v_{ij}$ on the fly. Memory drops from $O(d^2)$ to $O(d)$ per matrix.
+
+T5 used Adafactor. Newer models (Llama, Mistral) use AdamW instead, partly because the memory savings of Adafactor are less compelling once you have ZeRO/FSDP sharding the optimizer state across GPUs.
+
+### LION
+
+[LION](https://arxiv.org/abs/2302.06675) (Chen et al., 2023, "evoLved sIgn momentum") is a simpler, cheaper alternative discovered by neural-architecture search. The update is
+
+$$\theta_{t+1} = \theta_t - \eta \cdot \text{sign}(\beta_1 m_t + (1-\beta_1) g_t)$$
+
+That's it. No second moment. The update direction is just the sign of a momentum-smoothed gradient. Memory drops to one moment per parameter (4 bytes vs Adam's 8).
+
+LION matches or beats AdamW on many tasks, with half the optimizer memory. It tends to be more sensitive to learning rate (you typically use ~1/10th the LR of AdamW), and its track record at very large scale is still being established. Worth knowing about; not yet the default.
+
+### Muon
+
+[Muon](https://kellerjordan.github.io/posts/muon/) (Keller Jordan, 2024) is the most exciting recent optimizer. The update for matrix-valued parameters is
+
+$$\theta_{t+1} = \theta_t - \eta \cdot \text{NewtonSchulz}(M_t)$$
+
+where $M_t$ is a momentum-smoothed gradient and NewtonSchulz is a few iterations of an algorithm that approximately *orthogonalizes* the matrix. The intuition: gradients in deep nets tend to have a few dominant singular directions, which makes Adam's per-parameter scaling miscalibrated. Orthogonalizing the update spreads it across all directions equally.
+
+Muon has won several speedrun records (training nanoGPT to a target loss in fewer steps than anything else), and several recent labs have started exploring it for full-scale pre-training. It's one of the genuine open research areas — the second-moment-free school of optimizers may turn out to be a meaningful step beyond AdamW.
+
+### Schedule-Free
+
+A different angle: ditch the LR schedule entirely. [Schedule-free SGD/AdamW](https://arxiv.org/abs/2405.15682) (Defazio et al., 2024) uses an averaging trick — equivalent to running iterate averaging in a clever way — that achieves the same convergence properties as a tuned cosine schedule without ever lowering the LR.
+
+Practically: you don't have to decide your training horizon up front. With cosine, if you decide to train 20% longer than planned, your final LR was tuned for the wrong endpoint. Schedule-free fixes this. Adoption is still early but growing.
+
+---
+
+## Learning-Rate Schedules
+
+Even with adaptive optimizers, the global learning rate matters and has to change over training. Three main schedule families dominate:
+
+### Linear Warmup + Cosine Decay (the classic)
+
+Start at LR = 0. Linearly ramp up to peak LR over the first ~1% of steps. Then cosine-decay to 10% of peak by the end of training.
+
+The warmup is non-negotiable. Without it, the optimizer's second-moment estimates are uninitialized at step 1, the effective LR is huge, and the model often diverges in the first few hundred steps. Empirical rule: warmup for at least 1% of total steps, often 2,000-4,000 steps for a typical pre-training run.
+
+The cosine decay is empirical. It works well; nobody's super sure why exactly cosine specifically. Linear decay also works. Square-root decay also works. Cosine is just the cultural default.
+
+### WSD (Warmup-Stable-Decay)
+
+[WSD](https://arxiv.org/abs/2404.06395) (Hu et al., MiniCPM, 2024) replaces cosine with three phases: linear warmup, then a long *constant* LR phase, then a fast decay (linear or exponential) at the end.
+
+The advantage: you can extend training mid-run. With cosine, the decay schedule depends on the *total* training duration. If you decide partway through to train longer, you have to re-derive the cosine and re-warm-up. With WSD, the constant phase can be extended arbitrarily; only the decay needs replanning. MiniCPM's recipe was the first to popularize this; now several frontier labs use variants.
+
+### Inverse-Square-Root
+
+The original Transformer paper used $\eta_t \propto 1/\sqrt{t}$ (with a warmup). Mostly out of favor now in favor of cosine/WSD, but worth knowing as the "old default."
+
+---
+
+## Batch Size and Critical Batch Size
+
+The batch size you train at affects both gradient quality and compute efficiency. Larger batches give better gradient estimates (lower variance) but eventually hit diminishing returns.
+
+[McCandlish et al. (2018)](https://arxiv.org/abs/1812.06162) introduced the **critical batch size** — the batch size beyond which doubling the batch barely improves convergence. For early-training, the critical batch size is small (a few thousand tokens). For late-training (after the model has learned a lot), it's much larger (millions of tokens).
+
+This is why most modern recipes use **batch size warmup**. Llama 3 started training at 4M tokens per batch and ramped up to 16M; GPT-3 used a similar curve. You can't usefully use 16M tokens early — the gradient estimate is already accurate enough at 4M, and the extra batch is wasted compute.
+
+**Linear LR scaling rule**: when you double the batch size, double the learning rate. This rule holds approximately within the regime where the gradient noise is the main source of variation. Past the critical batch size, it breaks down.
+
+---
+
+## Gradient Clipping
+
+Sometimes — for reasons we'll get to — a single gradient comes back enormous. Maybe an attention layer hit a numerical pathology. Maybe a few tokens triggered a tail-of-the-distribution data error. Whatever the cause, an unclamped huge gradient can destroy the model in a single step.
+
+The standard defense is **global-norm gradient clipping**:
+
+$$g \leftarrow g \cdot \min\left(1, \frac{c}{\|g\|}\right)$$
+
+where $c$ is a threshold (1.0 is the universal default). If the global L2 norm of the gradient exceeds $c$, scale the whole gradient down to have norm $c$. Otherwise, leave it.
+
+This is cheap, robust, and effective. Almost every LLM trained in the last 5 years uses it. Skip it at your peril.
+
+---
+
+## Loss Spikes
+
+Even with all the above, training large transformers occasionally exhibits **loss spikes** — the loss jumps from, say, 2.0 to 5.0 in a single step, sometimes recovering, sometimes not.
+
+When you watch enough training runs, you start to recognize the pattern. Three culprits:
+
+### 1. Bad Data
+
+A specific batch contains extreme outliers — a sequence with a token repeated 10,000 times, a corrupted UTF-8 sequence that triggers some tokenizer pathology, etc. The gradients on this batch are huge.
+
+Defense: gradient clipping. Cure: data filtering during preprocessing.
+
+### 2. Attention Logit Growth
+
+The attention scores $QK^T / \sqrt{d_k}$ can grow during training. As they grow, the softmax becomes more saturated (close to one-hot), the gradients flowing back through it shrink (saturated softmax has near-zero gradient), and you get a self-reinforcing loop where one attention head becomes a *dead head* — softmax always outputs the same one-hot, gradient is zero, parameters stop updating in any meaningful way.
+
+The cure is **QK-LayerNorm**: normalize $Q$ and $K$ before computing attention scores. The score is now bounded:
+
+$$\text{attn} = \text{softmax}\left(\frac{\hat{Q} \hat{K}^T}{\sqrt{d_k}}\right), \quad \hat{Q} = \text{LN}(Q), \quad \hat{K} = \text{LN}(K)$$
+
+This was introduced in [Dehghani et al. 2023 (ViT-22B)](https://arxiv.org/abs/2302.05442) and is now standard in most large transformers. PaLM, ViT-22B, and many others use it.
+
+### 3. Embedding Divergence and z-loss
+
+The output projection (logits = embedding × hidden_state) can produce extremely large logits if the embedding norms drift. Softmax then flattens to one-hot, gradients vanish, and recovery is impossible.
+
+The defense is **z-loss** (originated in PaLM): an auxiliary loss term that penalizes the logsumexp of the logits.
+
+$$\mathcal{L}_z = 10^{-4} \cdot \log^2\left(\sum_v \exp(z_v)\right)$$
+
+This pulls the partition function toward 1, which keeps the logits small. Tiny coefficient, big stability win. Used in PaLM, used in subsequent Google models, recommended.
+
+### Recovery: Rewind and Skip
+
+When a spike does happen, the practical recipe is:
+
+1. Detect the spike (loss > 2× a moving average, or grad norm > 10× moving average)
+2. Rewind to a checkpoint from before the spike
+3. Skip the offending batch
+4. Resume training
+
+Llama 3 reports doing this: certain identified bad-batch indices were skipped on the next run-through. It's hacky, it works.
+
+---
+
+## Other Stability Tricks
+
+A grab-bag of related techniques worth knowing:
+
+- **Residual scaling / DeepNorm**: scale residual connections by a constant to keep activations from compounding through depth. Useful for very deep models. Standard in models past ~50 layers.
+- **Embedding tying**: share the input and output embedding matrix. Cuts parameters; also tends to stabilize training because the two are forced to live in the same space.
+- **Pre-LayerNorm vs Post-LayerNorm**: pre-LN (norm before the sublayer) is the modern standard; post-LN was the original transformer recipe but is harder to train at scale.
+- **RMSNorm vs LayerNorm**: RMSNorm drops the mean-centering step, slightly cheaper, no real downside. Used by Llama, Mistral, etc.
+
+These aren't optional ornaments; they're load-bearing pieces of why modern transformers train stably at scale.
+
+---
+
+## µP: Hyperparameter Transfer
+
+Tuning hyperparameters at frontier scale is impossible. You can't run hyperparameter sweeps when each run costs $50M and takes 3 months. You'd like to tune at small scale (a 100M-parameter model, a few hours of compute) and transfer the winning hyperparameters to the full-scale run.
+
+The naive approach doesn't work. Optimal LR at 100M is not optimal LR at 100B — it depends on the model size in non-obvious ways.
+
+**µP (Maximal Update Parameterization)** ([Yang & Hu, 2021](https://arxiv.org/abs/2203.03466)) is a parameterization of weights and learning rates such that the optimal hyperparameters are *invariant* across scale. Tune them once at small scale; they transfer.
+
+The recipe parameterizes initialization scales and per-parameter learning rates so that the magnitude of activation updates stays $O(1)$ across all model widths. Concretely:
+
+- Init scales depend on whether the parameter is "input-like" (embedding), "output-like" (LM head), or "hidden" (intermediate weight matrix)
+- Per-parameter LR multipliers depend on the parameter's role in the network
+- Once µP-correct, sweeping LR on a 100M-parameter model gives you the optimal LR for a 100B-parameter model of the same architecture
+
+µP has been adopted by several frontier labs as the standard for hyperparameter transfer. Cerebras, Microsoft, and OpenAI have all reported using variants. It's not always trivial to set up — getting the parameterization exactly right takes care — but the cost savings are enormous.
+
+---
+
+## Compilation and Kernel Fusion
+
+A lot of the speed in modern LLM training comes from *not* running the math the way the model code suggests. Two layers of optimization sit between your PyTorch code and the actual GPU work:
+
+### torch.compile
+
+PyTorch 2.0's [torch.compile](https://pytorch.org/docs/stable/torch.compiler.html) takes Python code, traces it to a graph, fuses operations, and emits optimized kernels (often via the Triton compiler). Typical speedup is 30–50% on transformer training, with no model code changes.
+
+The main thing it does is **operator fusion** — combine many tiny GPU ops into one larger kernel. A single `x = layernorm(x); x = linear(x); x = gelu(x)` ends up as one kernel instead of three, cutting memory traffic dramatically.
+
+### CUDA Graphs
+
+CPU launch overhead — the time spent issuing each kernel from CPU to GPU — can dominate at small batch sizes or in inference. CUDA Graphs let you record a sequence of kernel launches once and replay it many times with near-zero CPU cost. Useful for both training and inference.
+
+### Fused Kernels: FlashAttention
+
+The canonical example of a hand-written fused kernel is [FlashAttention](https://arxiv.org/abs/2205.14135). The naive attention computation materializes the $N \times N$ attention matrix in HBM, even though the matrix is immediately reduced via softmax. FlashAttention tiles the computation, fuses the softmax, and never materializes the matrix in slow memory. The result is a 2–4× speedup *and* major memory savings — both critical at long context.
+
+Hand-written fused kernels are the second-to-last layer of the optimization stack. The last layer is the GPU hardware itself.
+
+---
+
+## Closing
+
+Numerics is the layer that turns "the math works on paper" into "the math works on 16,000 H100s for 90 days." Mixed precision, optimizer choice, schedules, clipping, stability tricks — none of these are optional once you're past a few billion parameters. Skip any of them and you end up with a divergent run, a bad model, or a 50% throughput hit.
+
+What's worth internalizing:
+- BF16 + FP32 master weights is the universal pre-training recipe
+- AdamW with linear-warmup-cosine-decay is the default; LION/Muon/schedule-free are emerging alternatives
+- Gradient clipping at norm 1.0 is mandatory
+- QK-LayerNorm and z-loss prevent the two main loss-spike modes
+- µP makes hyperparameter sweeps possible at scale
+
+When you fine-tune a pre-trained model in the [next post](/blog/peft-lora), you inherit most of the numerical recipe of the base model — but you also get to revisit the choices for your shorter, smaller-scale fine-tuning workload. Sometimes the right LR is 100× smaller; sometimes you can drop FP32 master weights entirely; sometimes you need new stability tricks for the SFT objective. We'll cover that.
+
+---
+
+## References
+
+- **[Mixed Precision Training](https://arxiv.org/abs/1710.03740)** (Micikevicius et al., NVIDIA, 2017) — The original mixed-precision recipe with loss scaling.
+- **[BFloat16: The secret to high performance on Cloud TPUs](https://cloud.google.com/blog/products/ai-machine-learning/bfloat16-the-secret-to-high-performance-on-cloud-tpus)** (Google, 2019) — BF16's design rationale.
+- **[Adam: A Method for Stochastic Optimization](https://arxiv.org/abs/1412.6980)** (Kingma & Ba, 2014).
+- **[Decoupled Weight Decay Regularization](https://arxiv.org/abs/1711.05101)** (Loshchilov & Hutter, 2017) — AdamW.
+- **[8-bit Optimizers via Block-wise Quantization](https://arxiv.org/abs/2110.02861)** (Dettmers et al., 2021) — bitsandbytes 8-bit Adam.
+- **[Adafactor: Adaptive Learning Rates with Sublinear Memory Cost](https://arxiv.org/abs/1804.04235)** (Shazeer & Stern, 2018).
+- **[Symbolic Discovery of Optimization Algorithms](https://arxiv.org/abs/2302.06675)** (Chen et al., 2023) — LION.
+- **[Muon: An Optimizer for Hidden Layers in Neural Networks](https://kellerjordan.github.io/posts/muon/)** (Keller Jordan, 2024).
+- **[The Road Less Scheduled](https://arxiv.org/abs/2405.15682)** (Defazio et al., 2024) — Schedule-free optimization.
+- **[MiniCPM: Unveiling the Potential of Small Language Models with Scalable Training Strategies](https://arxiv.org/abs/2404.06395)** (Hu et al., 2024) — WSD schedule.
+- **[An Empirical Model of Large-Batch Training](https://arxiv.org/abs/1812.06162)** (McCandlish et al., 2018) — Critical batch size.
+- **[Scaling Vision Transformers to 22 Billion Parameters](https://arxiv.org/abs/2302.05442)** (Dehghani et al., 2023) — QK-LayerNorm.
+- **[PaLM: Scaling Language Modeling with Pathways](https://arxiv.org/abs/2204.02311)** (Chowdhery et al., 2022) — z-loss.
+- **[DeepNet: Scaling Transformers to 1,000 Layers](https://arxiv.org/abs/2203.00555)** (Wang et al., 2022) — DeepNorm residual scaling.
+- **[Tensor Programs V: Tuning Large Neural Networks via Zero-Shot Hyperparameter Transfer](https://arxiv.org/abs/2203.03466)** (Yang & Hu, 2021) — µP.
+- **[FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness](https://arxiv.org/abs/2205.14135)** (Dao et al., 2022).
+
+---
+
+*Next up: [Fine-Tuning: Teaching a Model to Listen](/blog/peft-lora) — taking a pre-trained base model and turning it into something useful with PEFT and LoRA.*
 
 ---
 

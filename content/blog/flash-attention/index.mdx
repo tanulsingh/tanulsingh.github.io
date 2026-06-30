@@ -16,19 +16,21 @@ featured: true
 
 ## A Different Kind of Optimization
 
-In Parts 2 and 3, we changed **what** attention computes — sharing KV heads, compressing into latents, skipping sparse connections. Every technique modified the attention algorithm itself.
+In Parts 2 and 3, we tried to change the **attention mechanism** such that compute time is lowered — sharing KV heads, compressing into latents, skipping sparse connections all work by modifying the attention algorithm itself. While these give us significant improvements in compute time, they also carry a risk of losing accuracy in the process because of the change in the underlying structure of attention.
 
-Flash Attention does something fundamentally different: it computes the **exact same result** as standard attention — same $QK^T$, same softmax, same weighted sum of values — but rearranges *how* the GPU executes it. No approximation, no sparsity, no architectural change. Just a deeper understanding of hardware.
+Hence, "**A more optimistic goal on the other hand would be to see if we can somehow speed up attention calculation without changing it**"
 
-The result: 2-4× faster attention, 5-20× less memory, and the ability to scale to much longer sequences. This single optimization is why most models today can use full dense attention at 32-128K context lengths without needing the sparse techniques from Part 3.
+In this part, we will seek out a solution for our optimistic goal, by gaining a deeper understanding of the hardware where the calculations are performed.
 
-To understand why this works, we need to understand why naive attention is slow in the first place. And that requires understanding how GPUs actually move data.
+We will see that the Flash Attention algorithm computes the **exact same result** as standard attention but 2-4× faster and by using 5-20× less memory, by applying the insights gained from a deeper understanding of the hardware.
+
+We will also see how this single optimization is why most models today can use full dense attention at 32-128K context lengths without needing the sparse techniques from Part 3.
+
+Let's start by understanding how GPUs (the hardware) do these calculations and then we will answer the question "Can we do these calculations in a better way?"
 
 ---
 
-## The GPU Memory Hierarchy
-
-Every explanation of Flash Attention starts here, because this is the root cause of everything.
+## Inside of a GPU
 
 A modern GPU (like an A100 or H100) has two main memory levels:
 
@@ -38,7 +40,7 @@ A modern GPU (like an A100 or H100) has two main memory levels:
 - **Bandwidth**: ~2 TB/s (A100), ~3.35 TB/s (H100)
 - **Role**: stores all your tensors — weights, activations, KV cache, everything
 
-This is what people usually mean by "GPU memory." It's large enough to hold your model and activations, and its bandwidth sounds fast — 2 terabytes per second!
+This is what shows up when you do `nvidia-smi` and what people usually mean by "GPU memory." It's large enough to hold your model and activations and all of your data needed for the calculations.
 
 ### SRAM (On-Chip Memory) — Small but Fast
 
@@ -48,17 +50,25 @@ This is what people usually mean by "GPU memory." It's large enough to hold your
 
 SRAM is where the tensor cores do their matrix multiplies. It's roughly **10× faster** than HBM, but **4000× smaller**.
 
-### The Implication
+### Lifecycle of a Computation
 
-Every arithmetic operation requires its operands to be in SRAM. So the lifecycle of a computation looks like:
+To understand the GPU memory landscape better, we can consider the GPU being a water treatment plant — the HBM is the reservoir where all the water lives and SRAM is the cleaning machine which cleans the water.
 
-1. **Load** data from HBM into SRAM
-2. **Compute** on data in SRAM (matrix multiply, add, etc.)
-3. **Store** result back from SRAM to HBM
+Now for our water to be cleaned we need to pump every litre of water in the reservoir to the cleaning machine and then after cleaning, back to the reservoir.
 
-If the computation is simple (like an element-wise add) but the data is large, you spend most of your time on steps 1 and 3 — just moving bytes between HBM and SRAM. The tensor cores sit idle, waiting for data.
+Similarly in a GPU, every arithmetic operation requires its operands to be in SRAM. So the lifecycle of a computation looks like:
 
-This is the difference between:
+1. **Load** data from HBM into SRAM (pump the water from reservoir to the cleaning machine)
+2. **Compute** on data in SRAM (matrix multiply, add, etc.) (clean the water)
+3. **Store** result back from SRAM to HBM (pump the water back to the reservoir)
+
+From our analogy, if we are to design an efficient water treatment plant, we need to be able to pump more water to the machine than it is able to clean in one go, otherwise the machine will sit idle waiting for the water to come. **For that we must make sure that the water is spending more time in the machine than being transferred.**
+
+By similar logic, to most efficiently utilise our GPUs, we need the computation time on data to be more than the movement time of data in between SRAM and HBM. If the computation is simple (like an element-wise add) but the data is large, we will spend most of our time on steps 1 and 3 — just moving bytes between HBM and SRAM and the tensor cores sit idle, waiting for data.
+
+You might have heard people saying, "Our operations should always be **compute-bound** and not **memory-bound**." This is what they mean by that.
+
+Types of operations:
 - **Compute-bound** operations: the arithmetic takes longer than the data movement (e.g., large matrix multiplies with high arithmetic intensity)
 - **Memory-bound** operations: the data movement takes longer than the arithmetic (e.g., element-wise operations, reductions, softmax)
 
@@ -94,19 +104,18 @@ For $N = 8192$ (a modest context length) with FP16:
 - With 32 heads: **4 GB** of intermediate storage
 - Each byte moves through the HBM bus multiple times
 
-The actual matrix multiplies ($QK^T$ and $PV$) are fast — they have high arithmetic intensity. But the softmax in between forces us to **materialize the entire $N \times N$ matrix in HBM**, read it back, normalize it, write it back, and then read it again.
+One way to solve this would be to fuse the three kernels together — go directly from Q, K, V to the attention output O in one shot, without ever writing P back to HBM. By keeping the whole computation in SRAM, we would not require the HBM round trips.
+However, P is an $N \times N$ matrix. For $N = 8192$, that's 128 MB per head — which is far bigger than SRAM's ~20 MB total. So we can't just load the whole thing in.
 
-Softmax is the bottleneck. Not because it's expensive to compute (it's just exp, sum, divide), but because it requires access to the **entire row** before any output can be produced. You can't compute $\text{softmax}(x_i) = e^{x_i} / \sum_j e^{x_j}$ without knowing all $x_j$ values in the row first.
+We can look for some clever techniques like Tiling (discussed next), where we break P into small chunks that do fit in SRAM, process one chunk at a time, never materialise the full matrix. But there's a problem with applying it naively to attention: the softmax in the middle of the computation needs to see an entire row before producing any output. Tiling breaks the row across multiple chunks — and without the full row, you can't normalise.
 
-This seems to force us to materialize the full $N \times N$ matrix. You have to compute all scores in a row, store them somewhere (HBM — the only place big enough), then read them all back for softmax.
-
-Or do you?
+Softmax is the real bottleneck. Not because it's expensive (it's just exp, sum, divide), but because it requires the whole row at once. That's why standard attention is forced to materialise the full $N \times N$ matrix in HBM — softmax has nowhere else to look.
 
 ---
 
 ## Tiling: A General GPU Optimization
 
-Before jumping to Flash Attention's solution, let's understand **tiling** — a fundamental GPU optimization technique that's been used in high-performance computing for decades.
+Let's understand **tiling** — a fundamental GPU optimization technique that's been used in high-performance computing for decades.
 
 ### The Problem: Data Doesn't Fit in Fast Memory
 
@@ -186,7 +195,7 @@ For the $QK^T$ matmul and the $PV$ matmul — yes, standard tiling works fine. B
 
 ### Why Attention Tiling Is Simpler Than Matmul Tiling
 
-In our matmul example, $C = A \times B$ where both $A$ and $B$ were $(N \times N)$. Since the shared dimension was also large, we needed to tile the matrix along both dimensions so that we get a small tile which fits in GPU SRAM. And since the tiling occurred along both dimensions, we needed more than one iteration (k-steps) to arrive at the final output for each tile:
+In our matmul example, $C = A \times B$ where both $A$ and $B$ were $(N \times N)$. Since the shared dimension N was also large, we needed to tile the matrix along both dimensions so that we get a small tile which fits in GPU SRAM. And since the tiling occurred along both dimensions, we needed more than one iteration (k-steps) to arrive at the final output for each tile:
 
 $$C_{00} = A_{00} \times B_{00} + A_{01} \times B_{10} \quad \leftarrow \text{2 k-steps to complete one output tile}$$
 
@@ -242,15 +251,15 @@ This is what makes Flash Attention's tiling practical: we only tile the big dime
 
 ### The Softmax Problem
 
-And that's exactly the problem: **softmax needs the full row.**
+Tiling would have solved our problems of SRAM memory if not for softmax.
 
 If you're computing attention in tiles (say, processing K/V block 0 first, then block 1), you can't compute the final softmax denominator until you've seen *all* K/V blocks. The normalization constant $\sum_j e^{x_j}$ depends on every score in the row.
 
-This is the obstacle that made everyone assume tiling was impossible for attention. Each score tile is easy to compute, but softmax forces you to materialize the full row of scores in HBM before normalizing. And it's what the **online softmax** trick solves.
+To properly do kernel fusion and solve our memory overhead , we use another clever method : The Online Softmax
 
 ---
 
-## Online Softmax: The Trick That Enables Tiling
+## Online Softmax: The Step towards Kernel Fusion
 
 Standard softmax for a row $[x_1, x_2, \ldots, x_N]$:
 
@@ -258,9 +267,7 @@ $$\text{softmax}(x_i) = \frac{e^{x_i - m}}{\sum_{j=1}^{N} e^{x_j - m}}, \quad m 
 
 (The $m = \max$ subtraction is for numerical stability — standard practice.)
 
-The problem: you need $m$ (the max over the full row) and the full denominator before producing any output. Both require seeing **every** element in the row first. That's what forces us to materialize the full row in HBM — we can't tile softmax the way we tiled matrix multiply.
-
-Or can we?
+The problem as we say is that you need $m$ (the max over the full row) and the full denominator before producing any output. Both require seeing **every** element in the row first.
 
 ### The Intuition: Fix Your Mistakes As You Go
 
@@ -342,7 +349,9 @@ Note: online softmax wasn't invented by Flash Attention — it was proposed by [
 
 ---
 
-## The Real Contribution: Kernel Fusion
+## Kernel Fusion and The Full Algorithm
+
+Now that we know Online Softmax and Tiling , we can do kernel fusion and do the whole attenion calculation in one pass , before learning the full algorithm, lets just revisit what is a kernel and what is kernel fusion.
 
 ### What Is a GPU Kernel?
 
@@ -354,7 +363,7 @@ Think of it like a kitchen with a tiny countertop (SRAM) and a large pantry (HBM
 
 ### Why This Matters for Attention
 
-Online softmax is the enabler, but the core contribution of Flash Attention is **fusing the entire attention operation into a single kernel** — one cook who does everything on the countertop without putting intermediate results back in the pantry.
+Online softmax is the enabler, but the core contribution of Flash Attention is **fusing the entire attention operation into a single kernel, Kernel Fusion** — one cook who does everything on the countertop without putting intermediate results back in the pantry.
 
 In standard PyTorch, attention is three separate kernel launches:
 
@@ -385,7 +394,7 @@ This is the fundamental insight: **it's not about a smarter algorithm for softma
 
 ---
 
-## The Full Algorithm
+### The Full Algorithm
 
 With kernel fusion and online softmax, the complete algorithm becomes:
 
@@ -446,11 +455,12 @@ This is why Flash Attention unlocked long-context models. Before it, attention a
 
 ## The Backward Pass: Even Trickier
 
-In training, we need gradients. Standard attention stores the full $N \times N$ matrix $P$ for the backward pass (it's needed to compute $\frac{\partial L}{\partial S}$). That's the same $O(N^2)$ memory we just eliminated.
+We solved the round trips by doing tiling , online softmax and by never realising the intermediate P matrix , but that created another problem, during the backpropogation we will need that P , what would be do then? 
+If we save it to HBM , we lose what we just gained
 
-Flash Attention's solution: **recompute $P$ from $Q$, $K$ during the backward pass** rather than storing it.
+Flash Attention's solution is to **recompute $P$ from $Q$, $K$ during the backward pass** rather than storing it.
 
-This sounds wasteful — we're doing extra FLOPs. But the tradeoff is:
+This may sounds wasteful as we're doing extra FLOPs, But the real tradeoff is:
 - **Without recomputation**: store $N^2$ values in HBM (memory-bound, kills max sequence length)
 - **With recomputation**: extra $O(N^2 d)$ FLOPs (compute, which is cheap relative to memory bandwidth)
 
@@ -460,6 +470,7 @@ Since naive attention is memory-bound (not compute-bound), adding more compute d
 
 ## Flash Attention 2: The Loop Swap
 
+Flash Attention 2 takes one more efficient step in the direction of reducing memory bandwidth.
 Look at Flash Attention 1's pseudocode again. The running state ($\tilde{O}_i$, $m_i$, $\ell_i$) gets read from and written to HBM in the **inner loop** — once per (Q block, K/V block) pair. For $N/B$ Q-blocks and $N/B$ KV-blocks, that's $(N/B)^2$ HBM round-trips for partial outputs. Each round-trip is small ($B \times d$ instead of $N \times N$), but it adds up.
 
 Why does this happen? Because K/V is in the outer loop. When we fix a K/V block and cycle through all Q blocks in the inner loop, each Q block's partial output $\tilde{O}_i$ gets loaded, updated, and written back — then we move on to the next Q block. By the time the *next* K/V block comes around in the outer loop and we revisit Q block $i$, its partial output has been evicted from SRAM long ago. So we must write it to HBM after each visit and reload it next time.

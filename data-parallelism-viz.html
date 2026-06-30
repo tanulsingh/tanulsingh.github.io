@@ -1,0 +1,1117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Data Parallelism — How the Optimizations Work</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body, {delimiters: [{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]});"></script>
+<style>
+  :root {
+    --bg: #faf6ef;
+    --ink: #2a2520;
+    --muted: #6b6258;
+    --rule: #d9d0c2;
+    --accent: #b8612a;
+    --code-bg: #f0eadd;
+    --c-forward: #5b8ec7;
+    --c-backward: #d99a3f;
+    --c-comm: #c45656;
+    --c-step: #6a9a5a;
+    --c-idle: #d6cfc0;
+    --c-bucket: #8b6db1;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Charter', 'Iowan Old Style', Georgia, serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.6;
+    max-width: 880px;
+    margin: 3rem auto;
+    padding: 0 1.5rem;
+    font-size: 17px;
+  }
+  h1 {
+    font-size: 1.9rem;
+    font-weight: 600;
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: 0.6rem;
+    letter-spacing: -0.01em;
+  }
+  .subtitle { color: var(--muted); font-style: italic; margin-top: -0.4rem; margin-bottom: 2rem; }
+  h2 {
+    font-size: 1.35rem;
+    font-weight: 600;
+    margin-top: 2.8rem;
+    margin-bottom: 0.6rem;
+    color: var(--accent);
+    letter-spacing: -0.01em;
+  }
+  h3 { font-size: 1.05rem; font-weight: 600; margin-top: 1.5rem; }
+  code {
+    background: var(--code-bg);
+    padding: 0.1em 0.35em;
+    border-radius: 3px;
+    font-family: 'JetBrains Mono', Menlo, monospace;
+    font-size: 0.88em;
+  }
+  a { color: var(--accent); border-bottom: 1px dotted var(--accent); text-decoration: none; }
+
+  /* --- Visualization frame --- */
+  .viz {
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    background: #fff;
+    padding: 1.2rem 1.4rem;
+    margin: 1.4rem 0;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }
+  .viz-title { font-weight: 600; margin-bottom: 0.4rem; }
+  .viz-caption { color: var(--muted); font-size: 0.92em; margin-top: 0.6rem; }
+
+  .controls {
+    display: flex;
+    gap: 0.6rem;
+    align-items: center;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+  }
+  button.play {
+    background: var(--accent);
+    color: white;
+    border: none;
+    padding: 0.45rem 1rem;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 0.92em;
+    cursor: pointer;
+    font-weight: 500;
+  }
+  button.play:hover { background: #9c4f1f; }
+  button.play:active { transform: translateY(1px); }
+  .total-label { color: var(--muted); font-size: 0.92em; margin-left: auto; }
+  .total-label strong { color: var(--ink); font-family: 'JetBrains Mono', Menlo, monospace; font-weight: 600; }
+
+  /* --- Timeline --- */
+  .timeline {
+    display: grid;
+    grid-template-columns: 60px 1fr;
+    gap: 6px;
+    align-items: center;
+  }
+  .gpu-label {
+    text-align: right;
+    color: var(--muted);
+    font-size: 0.85em;
+    font-family: 'JetBrains Mono', Menlo, monospace;
+  }
+  .lane {
+    position: relative;
+    height: 28px;
+    background: #f5f1e6;
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .block {
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    border-radius: 2px;
+    color: white;
+    font-size: 10px;
+    font-family: 'JetBrains Mono', Menlo, monospace;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.15s;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .playing .block { opacity: 1; }
+  .block.f { background: var(--c-forward); }
+  .block.b { background: var(--c-backward); }
+  .block.c { background: var(--c-comm); }
+  .block.s { background: var(--c-step); }
+  .block.idle { background: var(--c-idle); color: var(--muted); }
+  .block.bucket { background: var(--c-bucket); }
+
+  /* Animate left-to-right reveal via clip-path */
+  .playing .block.anim {
+    animation: reveal var(--dur, 400ms) linear var(--delay, 0ms) both;
+  }
+  @keyframes reveal {
+    from { clip-path: inset(0 100% 0 0); opacity: 1; }
+    to { clip-path: inset(0 0 0 0); opacity: 1; }
+  }
+
+  /* Legend */
+  .legend {
+    display: flex;
+    gap: 1.2rem;
+    flex-wrap: wrap;
+    margin-top: 1rem;
+    font-size: 0.85em;
+    color: var(--muted);
+  }
+  .legend-item { display: flex; align-items: center; gap: 0.4rem; }
+  .swatch {
+    width: 14px; height: 14px; border-radius: 2px; display: inline-block;
+  }
+
+  /* Time axis */
+  .axis {
+    display: grid;
+    grid-template-columns: 60px 1fr;
+    gap: 6px;
+    margin-top: 6px;
+    font-size: 0.75em;
+    color: var(--muted);
+    font-family: 'JetBrains Mono', Menlo, monospace;
+  }
+  .axis-line {
+    position: relative;
+    height: 18px;
+    border-top: 1px solid var(--rule);
+  }
+  .tick {
+    position: absolute;
+    top: 2px;
+    transform: translateX(-50%);
+  }
+
+  /* Interactive slider for bucketing */
+  .slider-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin: 1rem 0;
+    font-size: 0.92em;
+  }
+  input[type=range] {
+    flex: 1;
+    accent-color: var(--accent);
+  }
+  .pill {
+    background: var(--code-bg);
+    padding: 0.2rem 0.6rem;
+    border-radius: 12px;
+    font-family: 'JetBrains Mono', Menlo, monospace;
+    font-size: 0.85em;
+  }
+
+  /* GPU diagram */
+  .gpu-diagram {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0.8rem;
+    margin: 1.2rem 0;
+  }
+  .gpu-box {
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 0.6rem;
+    background: #fcfaf4;
+  }
+  .gpu-box .title {
+    font-family: 'JetBrains Mono', Menlo, monospace;
+    font-size: 0.8em;
+    color: var(--muted);
+    margin-bottom: 0.4rem;
+  }
+  .layer-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .layer-stack .layer {
+    background: var(--code-bg);
+    border-radius: 2px;
+    height: 16px;
+    font-size: 9px;
+    font-family: 'JetBrains Mono', Menlo, monospace;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .batch-tag {
+    display: inline-block;
+    margin-top: 0.5rem;
+    padding: 0.15rem 0.45rem;
+    border-radius: 2px;
+    font-family: 'JetBrains Mono', Menlo, monospace;
+    font-size: 0.75em;
+    color: white;
+  }
+  .b1 { background: #c47654; } .b2 { background: #6b9bb8; } .b3 { background: #8aa86d; } .b4 { background: #b08bb8; }
+
+  blockquote {
+    border-left: 3px solid var(--accent);
+    background: var(--code-bg);
+    margin: 1.2rem 0;
+    padding: 0.8rem 1.2rem;
+    color: var(--ink);
+  }
+  p { margin: 0.7rem 0; }
+
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.92em; }
+  th, td { padding: 0.5rem 0.7rem; text-align: left; border-bottom: 1px solid var(--rule); }
+  th { background: var(--code-bg); font-weight: 600; }
+
+  .key-insight {
+    background: linear-gradient(to right, #f8efde, #faf6ef);
+    border-left: 3px solid var(--accent);
+    padding: 0.8rem 1.2rem;
+    margin: 1.4rem 0;
+    border-radius: 0 4px 4px 0;
+  }
+</style>
+</head>
+<body>
+
+<h1>Data Parallelism: What's Actually Happening</h1>
+<p class="subtitle">An interactive walkthrough of why naive DP is wasteful, and how three optimizations fix it.</p>
+
+<p>This is the missing visual companion to the HuggingFace Ultra-Scale Playbook section on data parallelism. Each idea below has an animated timeline you can replay. Hit the orange "Play" buttons.</p>
+
+<h2>The setup: what data parallelism actually does</h2>
+
+<p>You have 4 GPUs. Each one holds a <strong>complete copy</strong> of the model (same parameters, same architecture). Every step, you split your batch into 4 microbatches — one per GPU. Each GPU does forward + backward on its own microbatch. Then you <strong>average the gradients</strong> across the 4 GPUs (an <code>all-reduce</code>), so all 4 GPUs apply the same update and stay in sync.</p>
+
+<div class="gpu-diagram">
+  <div class="gpu-box">
+    <div class="title">GPU 0</div>
+    <div class="layer-stack">
+      <div class="layer">layer 4</div>
+      <div class="layer">layer 3</div>
+      <div class="layer">layer 2</div>
+      <div class="layer">layer 1</div>
+    </div>
+    <span class="batch-tag b1">microbatch A</span>
+  </div>
+  <div class="gpu-box">
+    <div class="title">GPU 1</div>
+    <div class="layer-stack">
+      <div class="layer">layer 4</div>
+      <div class="layer">layer 3</div>
+      <div class="layer">layer 2</div>
+      <div class="layer">layer 1</div>
+    </div>
+    <span class="batch-tag b2">microbatch B</span>
+  </div>
+  <div class="gpu-box">
+    <div class="title">GPU 2</div>
+    <div class="layer-stack">
+      <div class="layer">layer 4</div>
+      <div class="layer">layer 3</div>
+      <div class="layer">layer 2</div>
+      <div class="layer">layer 1</div>
+    </div>
+    <span class="batch-tag b3">microbatch C</span>
+  </div>
+  <div class="gpu-box">
+    <div class="title">GPU 3</div>
+    <div class="layer-stack">
+      <div class="layer">layer 4</div>
+      <div class="layer">layer 3</div>
+      <div class="layer">layer 2</div>
+      <div class="layer">layer 1</div>
+    </div>
+    <span class="batch-tag b4">microbatch D</span>
+  </div>
+</div>
+
+<p>All 4 GPUs run forward + backward in parallel. The synchronization happens in the gradient averaging step.</p>
+
+<p><strong>Why an all-reduce?</strong> Because each GPU saw different data and produced different gradients. If you didn't average them, after one step the 4 GPUs would have drifted apart — they'd no longer be replicas of the same model. The all-reduce keeps them in lockstep: every GPU ends up with the same averaged gradient, applies the same optimizer step, and remains a true replica.</p>
+
+<h2>Setup for the timelines below</h2>
+
+<p>To make this concrete, every timeline below uses these made-up but representative numbers:</p>
+
+<ul>
+  <li>Model has <strong>4 layers</strong></li>
+  <li>Forward pass per layer: <strong>20 ms</strong> (so full forward = 80 ms)</li>
+  <li>Backward pass per layer: <strong>30 ms</strong> (so full backward = 120 ms)</li>
+  <li>All-reduce for one layer's gradients: <strong>15 ms</strong></li>
+  <li>Optimizer step: <strong>10 ms</strong></li>
+</ul>
+
+<p>The numbers don't matter; the <em>shapes</em> of the bars do. Watch for idle time (gray) and overlap.</p>
+
+<h2>Naive DP: the wasteful version</h2>
+
+<div class="viz">
+  <div class="viz-title">Naive DP — sequential compute then communicate</div>
+  <div class="controls">
+    <button class="play" onclick="play('naive')">▶ Play</button>
+    <span class="total-label">Total step time: <strong>225 ms</strong></span>
+  </div>
+  <div class="timeline" id="naive">
+    <!-- One GPU is representative; all 4 do the same thing in lockstep -->
+    <div class="gpu-label">GPU 0</div>
+    <div class="lane">
+      <!-- Forward: 4 layers × 20ms = 80ms (0-80) -->
+      <div class="block f anim" style="left:0%; width:8.9%; --delay:0ms; --dur:160ms;">F1</div>
+      <div class="block f anim" style="left:8.9%; width:8.9%; --delay:160ms; --dur:160ms;">F2</div>
+      <div class="block f anim" style="left:17.8%; width:8.9%; --delay:320ms; --dur:160ms;">F3</div>
+      <div class="block f anim" style="left:26.7%; width:8.9%; --delay:480ms; --dur:160ms;">F4</div>
+      <!-- Backward: 4 layers × 30ms (80-200) -->
+      <div class="block b anim" style="left:35.6%; width:13.3%; --delay:640ms; --dur:240ms;">B4</div>
+      <div class="block b anim" style="left:48.9%; width:13.3%; --delay:880ms; --dur:240ms;">B3</div>
+      <div class="block b anim" style="left:62.2%; width:13.3%; --delay:1120ms; --dur:240ms;">B2</div>
+      <div class="block b anim" style="left:75.5%; width:13.3%; --delay:1360ms; --dur:240ms;">B1</div>
+      <!-- Wait for all gradients, then all-reduce all 4 at once: 60ms (worth of comm batched) -->
+    </div>
+
+    <div class="gpu-label" style="margin-top:4px;">comm</div>
+    <div class="lane" style="background:#f5f1e6;">
+      <!-- After all backward done (at 200), do all-reduce: 4 layers × 15ms = 60ms (200-260... but our axis is 225? let me adjust) -->
+      <!-- Actually let me rescale: forward 80 + backward 120 + all-reduce 60 + step 10 = 270ms total -->
+      <!-- I'll use 270ms = 100% -->
+      <div class="block c anim" style="left:74.1%; width:22.2%; --delay:1600ms; --dur:400ms;">all-reduce (60ms)</div>
+      <div class="block s anim" style="left:96.3%; width:3.7%; --delay:2000ms; --dur:80ms;">opt</div>
+    </div>
+  </div>
+  <div class="axis">
+    <div></div>
+    <div class="axis-line">
+      <span class="tick" style="left:0%;">0</span>
+      <span class="tick" style="left:29.6%;">80</span>
+      <span class="tick" style="left:74.1%;">200</span>
+      <span class="tick" style="left:96.3%;">260</span>
+      <span class="tick" style="left:100%;">270 ms</span>
+    </div>
+  </div>
+  <div class="legend">
+    <div class="legend-item"><span class="swatch" style="background:var(--c-forward)"></span> Forward</div>
+    <div class="legend-item"><span class="swatch" style="background:var(--c-backward)"></span> Backward</div>
+    <div class="legend-item"><span class="swatch" style="background:var(--c-comm)"></span> All-reduce</div>
+    <div class="legend-item"><span class="swatch" style="background:var(--c-step)"></span> Optimizer step</div>
+  </div>
+  <div class="viz-caption">The GPU does <em>all</em> the backward work, then sits idle while the network shuffles 60ms worth of gradients around. The all-reduce isn't doing GPU work — the GPU is just waiting. That's wasted time.</div>
+</div>
+
+<div class="key-insight">
+<strong>The wasteful insight:</strong> While the all-reduce is running, the GPU is doing nothing. We've already finished backward by the time we start communicating. But we could have started talking <em>much earlier</em> — as soon as layer 4's gradient was ready, we could have started reducing it while still computing layer 3's backward.
+</div>
+
+<h2>Wait — why can't the GPU just start the next batch?</h2>
+
+<p>The natural first thought: "if the GPU is sitting idle during all-reduce, why doesn't it just start processing the <em>next</em> microbatch in the meantime?"</p>
+
+<p>The answer is a hard mathematical constraint, not a software limitation. The next batch needs the <strong>updated weights</strong>. And the weights don't get updated until the optimizer step runs — which can't run until the all-reduce finishes.</p>
+
+<p>The dependency chain is rigid:</p>
+
+<div style="font-family:'JetBrains Mono', Menlo, monospace; font-size:0.9em; background:var(--code-bg); padding:0.8rem 1rem; border-radius:4px; margin:1rem 0; text-align:center;">
+  backward&nbsp; →&nbsp; all-reduce&nbsp; →&nbsp; optimizer step&nbsp; →&nbsp; next forward
+</div>
+
+<p>If you started the next forward pass during the all-reduce, you'd be running it on the <em>same stale weights</em> from the start of this step — not the updated ones. The math no longer matches synchronous SGD, which is the contract every modern frontier-scale recipe relies on. (There <em>are</em> async variants — asynchronous SGD, stale-gradient methods — but they have meaningfully worse optimization dynamics, and basically nobody trains frontier LLMs that way.)</p>
+
+<p>So "start the next batch" is off the table. What's the actual opportunity?</p>
+
+<h3>The real insight</h3>
+
+<p>The all-reduce of <strong>layer N's</strong> gradient doesn't depend on the backward pass of <strong>layers N-1, N-2, ...</strong>.</p>
+
+<p>Why? Because backward flows from output to input. The backward pass for layer N-1 needs:</p>
+<ul>
+  <li>Layer N-1's stored activations (from forward — already in memory)</li>
+  <li>The gradient flowing back from layer N — which is just $\frac{\partial L}{\partial \text{input}(N)}$, computed locally on this GPU</li>
+</ul>
+
+<p>It does <strong>not</strong> need the <em>averaged</em> gradient of layer N's parameters. Each GPU's local layer N gradient flows backward into layer N-1's local computation independently. The averaging across GPUs only matters later, when the optimizer step actually applies the update.</p>
+
+<p>So the question shouldn't be "what other batch can the GPU work on?" It should be:</p>
+
+<blockquote style="margin: 1.2rem 0; padding: 0.6rem 1rem; font-style: italic; background: #fcfaf4;">
+"What <em>current-batch</em> work is the GPU still going to do, that we could run in parallel with this all-reduce?"
+</blockquote>
+
+<p>And the answer is: <strong>the backward passes for the earlier layers</strong>. Layer 4's gradient is ready first. As soon as it's done, fire its all-reduce — meanwhile the GPU keeps grinding through backward for layer 3, then layer 2, then layer 1. The network handles layer 4's reduce while the SMs compute layer 3's gradient. Both pieces of hardware stay busy. Same step, no stale weights, no broken contracts.</p>
+
+<div class="key-insight">
+<strong>Recast the intuition:</strong> "GPU idle during all-reduce" is the wrong framing. The right framing is "different parts of the gradient computation have different dependencies, so they can run on different hardware in parallel." Layer N's averaged gradient and layer N-1's local gradient are independent — one belongs on the network, the other on the GPU.
+</div>
+
+<p>The only piece that can't overlap is the <strong>last layer's all-reduce</strong> (layer 1, the input layer). By the time layer 1's gradient is ready, backward is over — there's no more GPU work to hide it behind. That's the small "tail" you'll see at the end of the next timeline.</p>
+
+<h2>Optimization 1: Overlap all-reduce with backward pass</h2>
+
+<p>Backprop computes gradients <strong>from the last layer to the first</strong>. So layer 4's gradient is ready first, then layer 3's, then 2, then 1.</p>
+
+<p>Insight: as soon as layer 4's gradient is computed, we don't need to wait for the other gradients to begin synchronizing it. We can <em>start the all-reduce for layer 4 immediately</em>, in parallel with the backward computation that's still running for layers 3, 2, 1.</p>
+
+<p>In PyTorch this is implemented with a <strong>hook</strong>: a callback attached to each parameter that fires the moment its gradient is computed. The hook launches an async all-reduce for that parameter.</p>
+
+<div class="viz">
+  <div class="viz-title">Overlapped DP — all-reduce starts as each layer's backward finishes</div>
+  <div class="controls">
+    <button class="play" onclick="play('overlap')">▶ Play</button>
+    <span class="total-label">Total step time: <strong>225 ms</strong> &nbsp;|&nbsp; saved <strong>~45 ms</strong> (~17%)</span>
+  </div>
+  <div class="timeline" id="overlap">
+    <div class="gpu-label">GPU 0</div>
+    <div class="lane">
+      <!-- Forward 80ms -->
+      <div class="block f anim" style="left:0%; width:8.9%; --delay:0ms; --dur:160ms;">F1</div>
+      <div class="block f anim" style="left:8.9%; width:8.9%; --delay:160ms; --dur:160ms;">F2</div>
+      <div class="block f anim" style="left:17.8%; width:8.9%; --delay:320ms; --dur:160ms;">F3</div>
+      <div class="block f anim" style="left:26.7%; width:8.9%; --delay:480ms; --dur:160ms;">F4</div>
+      <!-- Backward: same 120ms -->
+      <div class="block b anim" style="left:35.6%; width:13.3%; --delay:640ms; --dur:240ms;">B4</div>
+      <div class="block b anim" style="left:48.9%; width:13.3%; --delay:880ms; --dur:240ms;">B3</div>
+      <div class="block b anim" style="left:62.2%; width:13.3%; --delay:1120ms; --dur:240ms;">B2</div>
+      <div class="block b anim" style="left:75.5%; width:13.3%; --delay:1360ms; --dur:240ms;">B1</div>
+    </div>
+
+    <div class="gpu-label" style="margin-top:4px;">comm</div>
+    <div class="lane" style="background:#f5f1e6;">
+      <!-- All-reduce for L4 starts when B4 ends (at 110) and takes 15ms (110-125) -->
+      <!-- L3 starts when B3 ends (at 140) and takes 15ms (140-155) -->
+      <!-- L2 starts when B2 ends (at 170) and takes 15ms (170-185) -->
+      <!-- L1 starts when B1 ends (at 200) and takes 15ms (200-215) -->
+      <!-- step at 215-225 -->
+      <div class="block c anim" style="left:40.7%; width:5.6%; --delay:880ms; --dur:120ms;">AR4</div>
+      <div class="block c anim" style="left:51.9%; width:5.6%; --delay:1120ms; --dur:120ms;">AR3</div>
+      <div class="block c anim" style="left:63.0%; width:5.6%; --delay:1360ms; --dur:120ms;">AR2</div>
+      <div class="block c anim" style="left:74.1%; width:5.6%; --delay:1600ms; --dur:120ms;">AR1</div>
+      <div class="block s anim" style="left:79.6%; width:3.7%; --delay:1720ms; --dur:80ms;">opt</div>
+    </div>
+  </div>
+  <div class="axis">
+    <div></div>
+    <div class="axis-line">
+      <span class="tick" style="left:0%;">0</span>
+      <span class="tick" style="left:29.6%;">80</span>
+      <span class="tick" style="left:74.1%;">200</span>
+      <span class="tick" style="left:83.3%;">225 ms</span>
+    </div>
+  </div>
+  <div class="legend">
+    <div class="legend-item"><span class="swatch" style="background:var(--c-forward)"></span> Forward</div>
+    <div class="legend-item"><span class="swatch" style="background:var(--c-backward)"></span> Backward</div>
+    <div class="legend-item"><span class="swatch" style="background:var(--c-comm)"></span> All-reduce per layer</div>
+    <div class="legend-item"><span class="swatch" style="background:var(--c-step)"></span> Optimizer step</div>
+  </div>
+  <div class="viz-caption">Each layer's all-reduce now starts the moment its backward finishes. By the time backward reaches layer 1, layers 4, 3, 2 have already been reduced. We only wait for the <em>last</em> all-reduce (layer 1's) before the optimizer step.</div>
+</div>
+
+<p>The bottom lane shows what the network is doing. Look at how it interleaves with the top lane — communication happens <em>while</em> the GPU is busy doing more backward work. Total step time drops from 270ms to 225ms.</p>
+
+<div class="key-insight">
+<strong>The pattern:</strong> Computation and communication can run on different hardware (GPU compute units vs network interface). Whenever you can structure your work so they happen in parallel, you eliminate the cost of one of them. This pattern shows up <em>everywhere</em> in distributed training — FSDP, pipeline parallelism, tensor parallelism all use variants of it.
+</div>
+
+<h2>Optimization 2: Bucketing gradients</h2>
+
+<p>Now we have a new problem. The model isn't 4 layers — it's potentially <strong>thousands of parameters</strong>. If we launch one all-reduce per parameter, we're launching thousands of tiny network operations, each with its own overhead (setup latency, kernel launch, buffer allocation). That's like sending a thousand 1-byte packets instead of one kilobyte packet.</p>
+
+<p><strong>Solution:</strong> group multiple parameters into a <strong>bucket</strong>. When the bucket is full, launch a single all-reduce for the whole bucket.</p>
+
+<div class="viz">
+  <div class="viz-title">Bucketing — fewer, larger all-reduces</div>
+  <div class="slider-row">
+    <span>Bucket size:</span>
+    <input type="range" id="bucketSlider" min="1" max="8" value="2" oninput="updateBuckets()">
+    <span class="pill" id="bucketLabel">2 params per bucket</span>
+  </div>
+  <div id="bucketViz" style="margin-top:1rem;"></div>
+  <div class="viz-caption">Each parameter has its gradient ready (top row, small green dots). With bucket size = 1, we get 8 separate all-reduces (each pays overhead). With bigger buckets, we get fewer but larger reduces. The total bytes transferred is the same, but the overhead drops dramatically.</div>
+</div>
+
+<p>In PyTorch DDP, the default bucket size is 25 MB. As gradients fill a bucket, it gets dispatched. This is the same idea as overlapping in Optimization 1 — but now the unit of overlap is a bucket, not an individual parameter.</p>
+
+<blockquote>
+<strong>Concrete numbers</strong>: For a 7B model with 200 parameter tensors, launching 200 all-reduces each with 30µs setup overhead = 6ms of pure overhead. With 5 buckets, overhead drops to 150µs. The actual data transferred is identical; only the number of "launches" changes.
+</blockquote>
+
+<h2>Optimization 3: Gradient accumulation + no_sync</h2>
+
+<p>Sometimes you want a bigger <em>effective</em> batch than your GPUs can fit. The trick is <strong>gradient accumulation</strong>: do many forward+backward passes, accumulate the gradients into the same buffer, and only call the optimizer step after K passes.</p>
+
+<p>But this interacts badly with naive DP. If you all-reduce after <em>every</em> backward pass during accumulation, you're paying the communication cost K times — when the only one that matters is the final one (the others are intermediate accumulation steps).</p>
+
+<div class="viz">
+  <div class="viz-title">Gradient accumulation — naive vs <code>no_sync()</code></div>
+  <div class="controls">
+    <button class="play" onclick="play('accum_bad'); play('accum_good');">▶ Play both</button>
+    <span class="total-label">4 microbatches per optimizer step</span>
+  </div>
+
+  <div style="margin-bottom:0.4rem; font-size:0.9em; color:var(--muted);">Naive: all-reduce after every microbatch — wasteful</div>
+  <div class="timeline" id="accum_bad" style="margin-bottom:1rem;">
+    <div class="gpu-label">GPU 0</div>
+    <div class="lane">
+      <!-- 4 microbatches each: F (10%) + B (15%) + AR (15%) + ... = ~40% each, but we'll fit 4 -->
+      <!-- Per microbatch: F=5%, B=8%, AR=8% = 21% × 4 = 84%, then step 5% = 89% -->
+      <!-- Use width units of 5% for F, 8% for B, 8% for AR. -->
+      <div class="block f anim" style="left:0%; width:5%; --delay:0ms; --dur:100ms;">F</div>
+      <div class="block b anim" style="left:5%; width:8%; --delay:100ms; --dur:160ms;">B</div>
+      <div class="block c anim" style="left:13%; width:8%; --delay:260ms; --dur:160ms;">AR</div>
+
+      <div class="block f anim" style="left:21%; width:5%; --delay:420ms; --dur:100ms;">F</div>
+      <div class="block b anim" style="left:26%; width:8%; --delay:520ms; --dur:160ms;">B</div>
+      <div class="block c anim" style="left:34%; width:8%; --delay:680ms; --dur:160ms;">AR</div>
+
+      <div class="block f anim" style="left:42%; width:5%; --delay:840ms; --dur:100ms;">F</div>
+      <div class="block b anim" style="left:47%; width:8%; --delay:940ms; --dur:160ms;">B</div>
+      <div class="block c anim" style="left:55%; width:8%; --delay:1100ms; --dur:160ms;">AR</div>
+
+      <div class="block f anim" style="left:63%; width:5%; --delay:1260ms; --dur:100ms;">F</div>
+      <div class="block b anim" style="left:68%; width:8%; --delay:1360ms; --dur:160ms;">B</div>
+      <div class="block c anim" style="left:76%; width:8%; --delay:1520ms; --dur:160ms;">AR</div>
+
+      <div class="block s anim" style="left:84%; width:4%; --delay:1680ms; --dur:80ms;">opt</div>
+    </div>
+  </div>
+
+  <div style="margin-bottom:0.4rem; font-size:0.9em; color:var(--muted);">With <code>no_sync()</code>: skip all-reduce except on the final microbatch</div>
+  <div class="timeline" id="accum_good">
+    <div class="gpu-label">GPU 0</div>
+    <div class="lane">
+      <div class="block f anim" style="left:0%; width:5%; --delay:0ms; --dur:100ms;">F</div>
+      <div class="block b anim" style="left:5%; width:8%; --delay:100ms; --dur:160ms;">B</div>
+
+      <div class="block f anim" style="left:13%; width:5%; --delay:260ms; --dur:100ms;">F</div>
+      <div class="block b anim" style="left:18%; width:8%; --delay:360ms; --dur:160ms;">B</div>
+
+      <div class="block f anim" style="left:26%; width:5%; --delay:520ms; --dur:100ms;">F</div>
+      <div class="block b anim" style="left:31%; width:8%; --delay:620ms; --dur:160ms;">B</div>
+
+      <div class="block f anim" style="left:39%; width:5%; --delay:780ms; --dur:100ms;">F</div>
+      <div class="block b anim" style="left:44%; width:8%; --delay:880ms; --dur:160ms;">B</div>
+      <div class="block c anim" style="left:52%; width:8%; --delay:1040ms; --dur:160ms;">AR</div>
+
+      <div class="block s anim" style="left:60%; width:4%; --delay:1200ms; --dur:80ms;">opt</div>
+    </div>
+  </div>
+  <div class="viz-caption">Gradients accumulate locally on each GPU without syncing. Only on the last microbatch — when we're about to step the optimizer — do we all-reduce. The communication cost drops by 4× for the same useful work.</div>
+</div>
+
+<p>Why is this safe? Because <code>grad_GPU_0 + grad_GPU_1 + ...</code> over microbatches gives the same final summed gradient whether you reduce after each microbatch or only at the end. Addition is commutative. As long as we do <em>one</em> all-reduce of the total accumulated gradients before the optimizer step, the result is mathematically identical.</p>
+
+<p>PyTorch exposes this as <code>model.no_sync()</code>:</p>
+
+<pre style="background:var(--code-bg); padding:0.8rem; border-radius:4px; font-size:0.88em; font-family:'JetBrains Mono', Menlo, monospace; overflow-x:auto;">for i, microbatch in enumerate(microbatches):
+    is_last = (i == len(microbatches) - 1)
+    context = nullcontext() if is_last else model.no_sync()
+    with context:
+        loss = model(microbatch)
+        loss.backward()
+optimizer.step()</pre>
+
+<h2>Putting DP together</h2>
+
+<p>All three DP optimizations stack:</p>
+
+<table>
+  <thead>
+    <tr><th>Setup</th><th>Wasted on communication</th><th>Throughput vs ideal</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Naive DP</td><td>All of it (sequential)</td><td>~60%</td></tr>
+    <tr><td>+ Overlap with backward</td><td>Only the "tail" — last layer's reduce</td><td>~85%</td></tr>
+    <tr><td>+ Bucketing</td><td>Same tail, but smaller overhead</td><td>~92%</td></tr>
+    <tr><td>+ no_sync during accumulation</td><td>Only on the last accumulation step</td><td>~97%</td></tr>
+  </tbody>
+</table>
+
+<p>(Numbers are illustrative — actual throughput depends on the model, network, and accumulation depth. The point is the directional improvement.)</p>
+
+<div class="key-insight">
+<strong>The unifying lesson:</strong> In distributed training, you almost never "do compute, then communicate, then compute again." That's always wasteful. The right model is "compute and communicate simultaneously, always, with the communication piggybacking on whatever compute is in flight." This same idea reappears in <strong>FSDP</strong> (prefetch next layer's params during current layer's compute), <strong>tensor parallelism</strong> (overlap all-reduce with subsequent layers), and <strong>pipeline parallelism</strong> (whole microbatches fly through the pipeline simultaneously).
+</div>
+
+<p>Once you internalize <em>overlap is everything</em>, almost every distributed training trick starts looking like a variation on the same theme.</p>
+
+<h1 style="margin-top:3.5rem;">Part 2: ZeRO / FSDP — sharding the redundant stuff</h1>
+<p class="subtitle">DP solves throughput but wastes memory. ZeRO fixes the waste.</p>
+
+<h2>The problem DP doesn't solve</h2>
+
+<p>You've optimized DP all the way: backward overlap, bucketing, no_sync. Throughput is great. But look at your GPU memory.</p>
+
+<p>With 8 GPUs running DDP on a 70B model, each GPU stores:</p>
+
+<table>
+  <thead>
+    <tr><th>Component</th><th>Per GPU</th><th>Across 8 GPUs</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>BF16 parameters</td><td>140 GB</td><td>1.12 TB (8× identical copies)</td></tr>
+    <tr><td>BF16 gradients</td><td>140 GB</td><td>1.12 TB (identical after all-reduce)</td></tr>
+    <tr><td>FP32 master weights + Adam $m$, $v$</td><td>840 GB</td><td>6.72 TB (identical)</td></tr>
+    <tr><td><strong>Total</strong></td><td><strong>1.12 TB / GPU</strong></td><td><strong>9 TB total, but only 1.12 TB unique</strong></td></tr>
+  </tbody>
+</table>
+
+<p>You're storing <strong>8 identical copies</strong> of everything. The cluster has 8× the memory of one GPU but holds only the same amount of unique state. That's pure waste.</p>
+
+<div class="key-insight">
+<strong>The ZeRO insight:</strong> If 8 GPUs are storing the same 1.12 TB of state, each one should store 140 GB (1/8) and reconstruct the rest on demand via communication. Same unique state, 1/8 the per-GPU memory.
+</div>
+
+<p>That's ZeRO. Three stages, each more aggressive than the last about what gets sharded.</p>
+
+<h2>The memory budget, restated</h2>
+
+<p>Following the ZeRO paper's notation: let $\Psi$ = parameter count. In BF16 training with Adam:</p>
+
+<table>
+  <thead>
+    <tr><th>Component</th><th>Bytes per param</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Parameters (BF16)</td><td>$2\Psi$</td></tr>
+    <tr><td>Gradients (BF16)</td><td>$2\Psi$</td></tr>
+    <tr><td>FP32 master weights + Adam $m$ + Adam $v$</td><td>$4\Psi + 4\Psi + 4\Psi = 12\Psi$</td></tr>
+    <tr><td><strong>Total (DDP)</strong></td><td>$\mathbf{16\Psi}$</td></tr>
+  </tbody>
+</table>
+
+<p>ZeRO shards the $12\Psi$ optimizer-related state, then the $2\Psi$ gradients, then the $2\Psi$ parameters — in that order.</p>
+
+<h2>The critical correction: all-reduce vs reduce-scatter</h2>
+
+<p>Before going further: a single subtle change drives everything in ZeRO. <strong>The all-reduce in vanilla DDP becomes a reduce-scatter in ZeRO.</strong></p>
+
+<table>
+  <thead>
+    <tr><th>Op</th><th>What every GPU has at the end</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>all-reduce(g)</code></td><td>The full averaged gradient for <em>every</em> parameter</td></tr>
+    <tr><td><code>reduce-scatter(g)</code></td><td>The averaged gradient for <em>only its 1/N shard</em> of parameters</td></tr>
+    <tr><td><code>all-gather(p)</code></td><td>The full parameter tensor (assembled from everyone's shards)</td></tr>
+  </tbody>
+</table>
+
+<p>The key identity:</p>
+
+<div style="text-align:center; font-family:'JetBrains Mono', Menlo, monospace; background:var(--code-bg); padding:0.8rem; border-radius:4px; margin:1rem 0;">
+<strong>all-reduce = reduce-scatter + all-gather</strong>
+</div>
+
+<p>DDP does both halves at once (in the all-reduce). ZeRO <em>splits them in time</em>: reduce-scatter during backward (so each GPU only keeps its gradient shard), and all-gather after the optimizer step (so everyone has the updated parameters for the next forward).</p>
+
+<p>The total bytes moved are the same — but now we have <em>two</em> opportunities to overlap communication with compute, and each GPU only ever has to store the slice it actively needs.</p>
+
+<h2>ZeRO-1: shard the optimizer state</h2>
+
+<p>The lightest stage. Each GPU still has the full BF16 parameters and full BF16 gradients (just like DDP), but only <strong>1/N of the optimizer state</strong> (FP32 master weights + Adam moments).</p>
+
+<div class="viz">
+  <div class="viz-title">ZeRO-1 — sharded optimizer state across 4 GPUs</div>
+  <div id="zero1Viz"></div>
+  <div class="viz-caption">Parameters (blue) and gradients (yellow) are duplicated — every GPU has the full set. Only the optimizer state (purple) is sharded. Each GPU holds its 1/4 slice of FP32 master weights + Adam <em>m</em> and <em>v</em>.</div>
+</div>
+
+<h3>The training step in ZeRO-1</h3>
+
+<ol>
+  <li><strong>Forward</strong>: each GPU has full BF16 params, runs forward on its microbatch. Same as DDP.</li>
+  <li><strong>Backward</strong>: each GPU computes the full $2\Psi$ BF16 gradients locally. Same as DDP.</li>
+  <li><strong>Reduce-scatter gradients</strong>: each GPU now <em>has access to</em> the averaged gradient for only its 1/N shard. <strong>But the full local gradient tensor is still in memory</strong> — ZeRO-1 doesn't bother dropping the unused portions.</li>
+  <li><strong>Optimizer step</strong>: each GPU updates only its 1/N slice of the FP32 master weights, using the 1/N gradient slice (the one it has Adam state for). The rest of the gradient is just sitting in memory, unused. Then casts its 1/N slice back to BF16.</li>
+  <li><strong>All-gather parameters</strong>: each GPU broadcasts its updated 1/N BF16 slice. After the gather, every GPU again has the full updated BF16 parameter tensor, ready for the next forward.</li>
+</ol>
+
+<div class="key-insight" style="margin-top:1.2rem;">
+<strong>The subtle point that trips people up:</strong> In ZeRO-1, gradients are <em>NOT</em> sharded as persistent storage. The full $2\Psi$ gradient sits on every GPU. Reduce-scatter is still used (to deliver the right averaged slice for the optimizer step), but the unused 7/8 of the gradient is not freed. Each GPU's optimizer step only consumes its 1/N slice because that's the only part it has optimizer state for — the rest is just dead memory until the next backward overwrites it. <strong>This is exactly what ZeRO-2 fixes.</strong>
+</div>
+
+<div class="viz">
+  <div class="viz-title">ZeRO-1 communication flow per training step</div>
+  <div class="controls">
+    <button class="play" onclick="play('zero1Flow')">▶ Play</button>
+  </div>
+  <div class="timeline" id="zero1Flow">
+    <div class="gpu-label">GPU 0</div>
+    <div class="lane">
+      <div class="block f anim" style="left:0%; width:15%; --delay:0ms; --dur:280ms;">forward</div>
+      <div class="block b anim" style="left:15%; width:25%; --delay:280ms; --dur:480ms;">backward</div>
+      <div class="block s anim" style="left:62%; width:6%; --delay:1080ms; --dur:120ms;">opt(1/4)</div>
+    </div>
+
+    <div class="gpu-label" style="margin-top:4px;">comm</div>
+    <div class="lane" style="background:#f5f1e6;">
+      <div class="block c anim" style="left:40%; width:22%; --delay:760ms; --dur:420ms;">reduce-scatter gradients</div>
+      <div class="block bucket anim" style="left:68%; width:22%; --delay:1200ms; --dur:420ms;">all-gather params</div>
+    </div>
+  </div>
+  <div class="legend">
+    <div class="legend-item"><span class="swatch" style="background:var(--c-forward)"></span> Forward</div>
+    <div class="legend-item"><span class="swatch" style="background:var(--c-backward)"></span> Backward</div>
+    <div class="legend-item"><span class="swatch" style="background:var(--c-comm)"></span> reduce-scatter</div>
+    <div class="legend-item"><span class="swatch" style="background:var(--c-bucket)"></span> all-gather</div>
+    <div class="legend-item"><span class="swatch" style="background:var(--c-step)"></span> Optimizer step (1/N work)</div>
+  </div>
+  <div class="viz-caption">Same total comm bytes as DDP (reduce-scatter + all-gather = one all-reduce in bytes). But now each GPU only updates 1/N of the parameters during the optimizer step — and the optimizer step is itself N× faster, since each GPU has 1/N the work.</div>
+</div>
+
+<h3>Memory math</h3>
+
+<p>Per-GPU memory: $2\Psi + 2\Psi + \frac{12\Psi}{N}$</p>
+
+<p>For 70B on 8 GPUs: $140 + 140 + \frac{840}{8} = 385\,\text{GB}$ per GPU. Down from 1.12 TB. <strong>~3× savings</strong>, no extra communication cost over DDP.</p>
+
+<h2>ZeRO-2: also shard the gradients</h2>
+
+<p>Recall the awkward thing about ZeRO-1: each GPU produced the full $2\Psi$ gradient during backward, reduce-scattered to learn its slice, then <em>kept the unused 7/8 sitting in memory</em> doing nothing. Wasteful.</p>
+
+<p>ZeRO-2 fixes this with a small but powerful scheduling change: instead of one big reduce-scatter at the end of backward, do <strong>layer-by-layer reduce-scatters during backward</strong> — and <strong>free the local gradient memory for each layer as soon as its scatter completes</strong>.</p>
+
+<p>The end result: each GPU never holds more than ~1/N of the gradient tensor at once. As backward progresses through layers, gradients are produced → scattered → dropped, layer by layer.</p>
+
+<table>
+  <thead>
+    <tr><th></th><th>ZeRO-1</th><th>ZeRO-2</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Optimizer state stored</td><td>1/N</td><td>1/N</td></tr>
+    <tr><td>Gradient memory after backward</td><td><strong>Full $2\Psi$</strong> (unused 7/8 wasted)</td><td><strong>1/N slice only</strong> (rest freed during backward)</td></tr>
+    <tr><td>Communication primitive</td><td>One reduce-scatter at end of backward</td><td>Many small reduce-scatters during backward</td></tr>
+    <tr><td>Total comm bytes</td><td>Same</td><td>Same</td></tr>
+  </tbody>
+</table>
+
+<p>Same communication primitive in aggregate. Same total bytes moved. The change is purely <em>when</em> the scatter happens (layer-by-layer overlapped with backward, instead of one big one at the end) and <em>whether you free the source memory after scattering</em> (yes vs no).</p>
+
+<div class="viz">
+  <div class="viz-title">ZeRO-2 — sharded optimizer state + gradients</div>
+  <div id="zero2Viz"></div>
+  <div class="viz-caption">Now both gradients (yellow) and optimizer state (purple) are sharded. Each GPU only holds 1/N of each. Parameters remain fully replicated.</div>
+</div>
+
+<p>It also stacks nicely with the DDP backward-overlap trick from earlier: the layer-by-layer reduce-scatters happen <em>during</em> the backward pass for earlier layers, hidden behind compute.</p>
+
+<h3>Memory math</h3>
+
+<p>Per-GPU memory: $2\Psi + \frac{2\Psi + 12\Psi}{N} = 2\Psi + \frac{14\Psi}{N}$</p>
+
+<p>For 70B on 8 GPUs: $140 + \frac{14 \cdot 70}{8} = 140 + 122.5 = 262.5\,\text{GB}$ per GPU. <strong>~4× savings vs DDP.</strong></p>
+
+<h2>ZeRO-3: also shard the parameters (a.k.a. FSDP)</h2>
+
+<p>ZeRO-3 — and PyTorch's equivalent, <strong>FSDP</strong> — is the big leap. Now even the parameters themselves are sharded. Each GPU permanently stores only 1/N of the BF16 weights.</p>
+
+<p>But the forward pass for a layer needs that layer's <em>full</em> weights. So before computing layer L's forward, every GPU all-gathers layer L's parameters from across the cluster. After the layer is done, drop the gathered weights. Same on backward — gather, compute, drop.</p>
+
+<div class="viz">
+  <div class="viz-title">ZeRO-3 / FSDP — everything sharded</div>
+  <div id="zero3Viz"></div>
+  <div class="viz-caption">Parameters, gradients, and optimizer state are all sharded. Each GPU only persistently stores 1/N of each. Full layer weights exist <em>transiently</em> during each layer's forward/backward, then get dropped.</div>
+</div>
+
+<h3>The training step in ZeRO-3</h3>
+
+<ol>
+  <li><strong>Forward pass</strong>: for each layer, all-gather that layer's params → compute forward → drop the gathered params. Repeat for every layer.</li>
+  <li><strong>Backward pass</strong>: for each layer (output to input), all-gather params → compute backward → reduce-scatter the local gradient → drop both. Each GPU ends backward with only its 1/N gradient shard.</li>
+  <li><strong>Optimizer step</strong>: each GPU updates only its 1/N slice. No comm.</li>
+  <li><strong>No final all-gather needed</strong> — that's deferred until the <em>next</em> forward's per-layer all-gathers.</li>
+</ol>
+
+<div class="viz">
+  <div class="viz-title">ZeRO-3 — per-layer all-gather, with prefetching</div>
+  <div class="controls">
+    <button class="play" onclick="play('zero3Flow')">▶ Play</button>
+  </div>
+  <div class="timeline" id="zero3Flow">
+    <div class="gpu-label">GPU 0</div>
+    <div class="lane">
+      <!-- 4 forward layers, each 15% wide -->
+      <div class="block f anim" style="left:5%; width:15%; --delay:100ms; --dur:280ms;">F1</div>
+      <div class="block f anim" style="left:20%; width:15%; --delay:380ms; --dur:280ms;">F2</div>
+      <div class="block f anim" style="left:35%; width:15%; --delay:660ms; --dur:280ms;">F3</div>
+      <div class="block f anim" style="left:50%; width:15%; --delay:940ms; --dur:280ms;">F4</div>
+    </div>
+
+    <div class="gpu-label" style="margin-top:4px;">comm</div>
+    <div class="lane" style="background:#f5f1e6;">
+      <!-- All-gather L1 starts at 0%, finishes at 5% (just in time for F1) -->
+      <div class="block bucket anim" style="left:0%; width:5%; --delay:0ms; --dur:100ms;">AG1</div>
+      <!-- Then prefetch L2 during F1 -->
+      <div class="block bucket anim" style="left:5%; width:15%; --delay:100ms; --dur:280ms;">AG2 (prefetch)</div>
+      <div class="block bucket anim" style="left:20%; width:15%; --delay:380ms; --dur:280ms;">AG3 (prefetch)</div>
+      <div class="block bucket anim" style="left:35%; width:15%; --delay:660ms; --dur:280ms;">AG4 (prefetch)</div>
+    </div>
+  </div>
+  <div class="viz-caption">Each layer's params are all-gathered <em>just in time</em>. While GPU is computing layer N's forward, the comm channel is fetching layer N+1's params. With perfect overlap, the GPU never waits — just like DDP's backward overlap.</div>
+</div>
+
+<h3>Memory math</h3>
+
+<p>Per-GPU memory: $\frac{2\Psi + 2\Psi + 12\Psi}{N} + \text{transient gather}$</p>
+
+<p>For 70B on 8 GPUs: $\frac{16 \cdot 70}{8} = 140\,\text{GB}$ per GPU (plus a small transient buffer for whichever layer's params are currently gathered). <strong>~8× savings vs DDP. Memory scales near-linearly with cluster size.</strong></p>
+
+<h2>Side-by-side: what each stage actually stores</h2>
+
+<div class="viz">
+  <div class="viz-title">DDP vs ZeRO-1 vs ZeRO-2 vs ZeRO-3</div>
+  <div id="zeroCompareViz"></div>
+  <div class="viz-caption">Each row is what a single GPU holds. Solid blocks = persistent; striped = transient (only during one layer's compute). Notice how ZeRO-3 is the only stage where parameter storage scales with cluster size.</div>
+</div>
+
+<h2>The trade-off: communication vs memory</h2>
+
+<table>
+  <thead>
+    <tr><th>Stage</th><th>Per-GPU memory (70B, N=8)</th><th>Comm vs DDP</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>DDP</td><td>1120 GB</td><td>1× all-reduce per step</td></tr>
+    <tr><td>ZeRO-1</td><td>385 GB</td><td>Same total bytes (reduce-scatter + all-gather = 1 all-reduce)</td></tr>
+    <tr><td>ZeRO-2</td><td>262 GB</td><td>Same as ZeRO-1</td></tr>
+    <tr><td>ZeRO-3 / FSDP</td><td>140 GB</td><td>~1.5× — extra per-layer all-gather during forward</td></tr>
+  </tbody>
+</table>
+
+<p>ZeRO-1 and ZeRO-2 are "free" — same comm as DDP, just structured differently. <strong>ZeRO-3 / FSDP pays real communication cost</strong>, and only works in practice because of aggressive prefetching that hides that cost behind compute.</p>
+
+<h2>Why activations aren't in the list</h2>
+
+<p>A natural question: ZeRO shards parameters, gradients, optimizer state. Why not activations?</p>
+
+<p>Because <strong>activations are already per-GPU.</strong> Each DP rank processes a different microbatch, so the activations it stores are computed from different data — they're not duplicates of each other, they're genuinely different tensors. Nothing to deduplicate.</p>
+
+<p>Activations are tackled by a different family of tricks: <strong>activation checkpointing</strong> (drop and recompute on backward), <strong>sequence parallelism</strong> (covered in Part 3), and <strong>FlashAttention</strong> (never materialize the attention matrix). Each targets activations directly; ZeRO doesn't touch them.</p>
+
+<div class="key-insight">
+<strong>The conceptual line:</strong> ZeRO/FSDP is the maximum amount of memory savings you can get while still keeping the premise "every GPU runs the same model on different data." Each GPU still computes the full forward pass on its own microbatch — it just has to gather some weights along the way. Once you start putting <em>different parts of the model</em> on different GPUs (tensor parallelism, pipeline parallelism), you've crossed into a different regime. That's the next post.
+</div>
+
+<h2>Putting all of Part 1 together</h2>
+
+<p>The four single-replica techniques (DDP optimizations + ZeRO) compose to give you frontier-scale-ready single-cluster training:</p>
+
+<table>
+  <thead>
+    <tr><th>Setup</th><th>70B per-GPU mem (N=8)</th><th>Comm cost</th><th>What's still wasted</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Naive DP</td><td>1120 GB</td><td>1 sequential all-reduce</td><td>All comm is sequential</td></tr>
+    <tr><td>+ Backward overlap + bucketing + no_sync</td><td>1120 GB</td><td>~1× overlapped all-reduce</td><td>8 redundant copies of model state</td></tr>
+    <tr><td>+ ZeRO-1</td><td>385 GB</td><td>Same total (split into RS + AG)</td><td>Gradient duplication</td></tr>
+    <tr><td>+ ZeRO-2</td><td>262 GB</td><td>Same</td><td>Parameter duplication</td></tr>
+    <tr><td>+ ZeRO-3 / FSDP</td><td>140 GB</td><td>~1.5× (per-layer AG)</td><td>Activations (handled by checkpointing)</td></tr>
+  </tbody>
+</table>
+
+<p>With ZeRO-3 + activation checkpointing, you can train a 70B model on a cluster of 8 H100s — modest by frontier standards but accessible to many research labs. Beyond that scale, you start running into FSDP's limits: very wide layers can't be gathered onto one GPU at all, and per-layer all-gathers become too chatty for inter-server networks. That's where Part 3 picks up.</p>
+
+<script>
+function play(id) {
+  const el = document.getElementById(id);
+  el.classList.remove('playing');
+  // force reflow so animation restarts
+  void el.offsetWidth;
+  el.classList.add('playing');
+}
+
+// ZeRO storage diagrams
+function renderZeroStorage(elId, stage) {
+  const NUM_GPUS = 4;
+  const el = document.getElementById(elId);
+  if (!el) return;
+
+  const colors = {
+    param: '#5b8ec7',
+    grad: '#d99a3f',
+    optim: '#8b6db1',
+  };
+
+  // For each GPU, show what they store. Solid = persistent, striped = transient
+  let html = '<div style="display:grid; grid-template-columns: 70px repeat(' + NUM_GPUS + ', 1fr); gap:8px; align-items:center; font-size:0.85em;">';
+
+  // Header row
+  html += '<div></div>';
+  for (let g = 0; g < NUM_GPUS; g++) {
+    html += '<div style="text-align:center; color:var(--muted); font-family:monospace; font-size:0.85em;">GPU ' + g + '</div>';
+  }
+
+  // Params row
+  html += '<div style="color:var(--muted); font-size:0.82em; text-align:right;">Params<br>(2Ψ)</div>';
+  for (let g = 0; g < NUM_GPUS; g++) {
+    if (stage === 'ddp' || stage === 'zero1' || stage === 'zero2') {
+      // Full param on every GPU
+      html += '<div style="height:32px; background:' + colors.param + '; border-radius:3px; display:flex; align-items:center; justify-content:center; color:white; font-family:monospace; font-size:0.78em;">full</div>';
+    } else if (stage === 'zero3') {
+      // Sharded: this GPU has shard g, plus transient block for current layer
+      html += '<div style="height:32px; position:relative; background:#f0eadd; border-radius:3px; overflow:hidden;">';
+      html += '<div style="position:absolute; top:0; bottom:0; left:0; width:25%; background:' + colors.param + '; display:flex; align-items:center; justify-content:center; color:white; font-family:monospace; font-size:0.7em;">1/4</div>';
+      html += '<div style="position:absolute; top:0; bottom:0; left:25%; right:0; background:repeating-linear-gradient(45deg, ' + colors.param + ', ' + colors.param + ' 4px, #e8d9c0 4px, #e8d9c0 8px); opacity:0.35; display:flex; align-items:center; justify-content:center; color:var(--muted); font-family:monospace; font-size:0.7em;">transient AG</div>';
+      html += '</div>';
+    }
+  }
+
+  // Gradients row
+  html += '<div style="color:var(--muted); font-size:0.82em; text-align:right;">Gradients<br>(2Ψ)</div>';
+  for (let g = 0; g < NUM_GPUS; g++) {
+    if (stage === 'ddp' || stage === 'zero1') {
+      html += '<div style="height:32px; background:' + colors.grad + '; border-radius:3px; display:flex; align-items:center; justify-content:center; color:white; font-family:monospace; font-size:0.78em;">full</div>';
+    } else {
+      // ZeRO-2, ZeRO-3: only 1/N
+      html += '<div style="height:32px; position:relative; background:#f0eadd; border-radius:3px; overflow:hidden;">';
+      html += '<div style="position:absolute; top:0; bottom:0; left:0; width:25%; background:' + colors.grad + '; display:flex; align-items:center; justify-content:center; color:white; font-family:monospace; font-size:0.7em;">1/4</div>';
+      html += '</div>';
+    }
+  }
+
+  // Optimizer state row
+  html += '<div style="color:var(--muted); font-size:0.82em; text-align:right;">Optim state<br>(12Ψ)</div>';
+  for (let g = 0; g < NUM_GPUS; g++) {
+    if (stage === 'ddp') {
+      html += '<div style="height:32px; background:' + colors.optim + '; border-radius:3px; display:flex; align-items:center; justify-content:center; color:white; font-family:monospace; font-size:0.78em;">full</div>';
+    } else {
+      // ZeRO-1, 2, 3: sharded
+      html += '<div style="height:32px; position:relative; background:#f0eadd; border-radius:3px; overflow:hidden;">';
+      html += '<div style="position:absolute; top:0; bottom:0; left:0; width:25%; background:' + colors.optim + '; display:flex; align-items:center; justify-content:center; color:white; font-family:monospace; font-size:0.7em;">1/4</div>';
+      html += '</div>';
+    }
+  }
+
+  html += '</div>';
+
+  // Memory summary
+  const memMap = {
+    ddp: '$2\\Psi + 2\\Psi + 12\\Psi = 16\\Psi$ per GPU',
+    zero1: '$2\\Psi + 2\\Psi + \\frac{12\\Psi}{N} = 5.5\\Psi$ per GPU (N=4)',
+    zero2: '$2\\Psi + \\frac{2\\Psi + 12\\Psi}{N} = 5.5\\Psi$ per GPU... wait',
+    zero3: '$\\frac{16\\Psi}{N} = 4\\Psi$ per GPU (N=4)',
+  };
+
+  html += '<div style="margin-top:1rem; padding:0.6rem 0.9rem; background:var(--code-bg); border-radius:4px; font-size:0.9em; text-align:center;">';
+  if (stage === 'ddp') html += 'Per-GPU memory: $2\\Psi + 2\\Psi + 12\\Psi = 16\\Psi$';
+  if (stage === 'zero1') html += 'Per-GPU memory: $2\\Psi + 2\\Psi + \\frac{12\\Psi}{4} = 7\\Psi$';
+  if (stage === 'zero2') html += 'Per-GPU memory: $2\\Psi + \\frac{2\\Psi + 12\\Psi}{4} = 5.5\\Psi$';
+  if (stage === 'zero3') html += 'Per-GPU memory: $\\frac{2\\Psi + 2\\Psi + 12\\Psi}{4} = 4\\Psi$';
+  html += '</div>';
+
+  el.innerHTML = html;
+
+  if (window.renderMathInElement) {
+    renderMathInElement(el, {delimiters: [{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]});
+  }
+}
+
+function renderZeroCompare() {
+  const el = document.getElementById('zeroCompareViz');
+  if (!el) return;
+
+  const stages = [
+    { id: 'ddp', label: 'DDP', mem: '$16\\Psi$' },
+    { id: 'zero1', label: 'ZeRO-1', mem: '$7\\Psi$' },
+    { id: 'zero2', label: 'ZeRO-2', mem: '$5.5\\Psi$' },
+    { id: 'zero3', label: 'ZeRO-3 / FSDP', mem: '$4\\Psi$' },
+  ];
+
+  const colors = { param: '#5b8ec7', grad: '#d99a3f', optim: '#8b6db1' };
+
+  let html = '<div style="display:grid; grid-template-columns: 120px repeat(3, 1fr) 80px; gap:8px; align-items:center; font-size:0.85em;">';
+
+  // Header
+  html += '<div></div>';
+  html += '<div style="text-align:center; color:var(--muted); font-family:monospace; font-size:0.85em;">Params (2Ψ)</div>';
+  html += '<div style="text-align:center; color:var(--muted); font-family:monospace; font-size:0.85em;">Gradients (2Ψ)</div>';
+  html += '<div style="text-align:center; color:var(--muted); font-family:monospace; font-size:0.85em;">Optim (12Ψ)</div>';
+  html += '<div style="text-align:center; color:var(--muted); font-family:monospace; font-size:0.85em;">Per-GPU</div>';
+
+  for (const s of stages) {
+    html += '<div style="font-weight:600;">' + s.label + '</div>';
+
+    // Params
+    if (s.id === 'zero3') {
+      html += '<div style="height:28px; position:relative; background:#f0eadd; border-radius:3px; overflow:hidden;"><div style="position:absolute; left:0; top:0; bottom:0; width:25%; background:' + colors.param + ';"></div></div>';
+    } else {
+      html += '<div style="height:28px; background:' + colors.param + '; border-radius:3px;"></div>';
+    }
+
+    // Gradients
+    if (s.id === 'zero2' || s.id === 'zero3') {
+      html += '<div style="height:28px; position:relative; background:#f0eadd; border-radius:3px; overflow:hidden;"><div style="position:absolute; left:0; top:0; bottom:0; width:25%; background:' + colors.grad + ';"></div></div>';
+    } else {
+      html += '<div style="height:28px; background:' + colors.grad + '; border-radius:3px;"></div>';
+    }
+
+    // Optim
+    if (s.id === 'ddp') {
+      html += '<div style="height:28px; background:' + colors.optim + '; border-radius:3px;"></div>';
+    } else {
+      html += '<div style="height:28px; position:relative; background:#f0eadd; border-radius:3px; overflow:hidden;"><div style="position:absolute; left:0; top:0; bottom:0; width:25%; background:' + colors.optim + ';"></div></div>';
+    }
+
+    // Per-GPU memory
+    html += '<div style="text-align:center; font-family:monospace; font-weight:600;">' + s.mem + '</div>';
+  }
+
+  html += '</div>';
+
+  html += '<div style="margin-top:1rem; display:flex; gap:1.2rem; flex-wrap:wrap; font-size:0.85em; color:var(--muted);">';
+  html += '<div style="display:flex; align-items:center; gap:0.4rem;"><span style="width:14px; height:14px; border-radius:2px; background:' + colors.param + ';"></span> Parameters</div>';
+  html += '<div style="display:flex; align-items:center; gap:0.4rem;"><span style="width:14px; height:14px; border-radius:2px; background:' + colors.grad + ';"></span> Gradients</div>';
+  html += '<div style="display:flex; align-items:center; gap:0.4rem;"><span style="width:14px; height:14px; border-radius:2px; background:' + colors.optim + ';"></span> Optimizer state</div>';
+  html += '<div style="color:var(--muted);">Filled bar = full tensor stored; partial fill = only 1/N shard stored</div>';
+  html += '</div>';
+
+  el.innerHTML = html;
+  if (window.renderMathInElement) {
+    renderMathInElement(el, {delimiters: [{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]});
+  }
+}
+
+// Wait for DOM + KaTeX
+window.addEventListener('load', () => {
+  renderZeroStorage('zero1Viz', 'zero1');
+  renderZeroStorage('zero2Viz', 'zero2');
+  renderZeroStorage('zero3Viz', 'zero3');
+  renderZeroCompare();
+});
+
+// Bucket viz
+function updateBuckets() {
+  const slider = document.getElementById('bucketSlider');
+  const bucketSize = parseInt(slider.value);
+  document.getElementById('bucketLabel').textContent = bucketSize + ' params per bucket';
+
+  const NUM_PARAMS = 8;
+  const numBuckets = Math.ceil(NUM_PARAMS / bucketSize);
+
+  const container = document.getElementById('bucketViz');
+  let html = '<div style="margin-bottom:1rem;"><div style="font-size:0.85em; color:var(--muted); margin-bottom:0.3rem; font-family: \'JetBrains Mono\', Menlo, monospace;">' + NUM_PARAMS + ' parameter gradients</div><div style="display:flex; gap:4px;">';
+  for (let i = 0; i < NUM_PARAMS; i++) {
+    const bucket = Math.floor(i / bucketSize);
+    const color = ['#5b8ec7','#d99a3f','#c45656','#6a9a5a','#8b6db1','#c47654','#6b9bb8','#8aa86d'][bucket % 8];
+    html += '<div style="flex:1; height:24px; background:' + color + '; border-radius:2px; display:flex; align-items:center; justify-content:center; color:white; font-size:10px; font-family:monospace;">p' + i + '</div>';
+  }
+  html += '</div></div>';
+
+  html += '<div style="margin-bottom:0.6rem;"><div style="font-size:0.85em; color:var(--muted); margin-bottom:0.3rem; font-family: \'JetBrains Mono\', Menlo, monospace;">' + numBuckets + ' all-reduce' + (numBuckets > 1 ? 's' : '') + ' (one per bucket)</div><div style="display:flex; gap:4px;">';
+
+  let leftFlex = 0;
+  for (let b = 0; b < numBuckets; b++) {
+    const paramsInBucket = Math.min(bucketSize, NUM_PARAMS - b * bucketSize);
+    const color = ['#5b8ec7','#d99a3f','#c45656','#6a9a5a','#8b6db1','#c47654','#6b9bb8','#8aa86d'][b % 8];
+    html += '<div style="flex:' + paramsInBucket + '; height:32px; background:' + color + '; opacity:0.85; border-radius:3px; display:flex; align-items:center; justify-content:center; color:white; font-size:11px; font-family:monospace;">all-reduce bucket ' + b + '</div>';
+    leftFlex += paramsInBucket;
+  }
+  html += '</div></div>';
+
+  const overheadPerReduce = 30;
+  const totalOverhead = numBuckets * overheadPerReduce;
+  html += '<div style="margin-top:0.8rem; padding:0.6rem 0.9rem; background:var(--code-bg); border-radius:4px; font-size:0.9em;"><strong>' + numBuckets + '</strong> launch' + (numBuckets > 1 ? 'es' : '') + ' × <strong>~' + overheadPerReduce + 'µs</strong> overhead each = <strong>~' + totalOverhead + 'µs</strong> total overhead<br><span style="color:var(--muted); font-size:0.92em;">(data transferred is identical regardless of bucket size — only launch overhead changes)</span></div>';
+
+  container.innerHTML = html;
+}
+updateBuckets();
+</script>
+
+</body>
+</html>
